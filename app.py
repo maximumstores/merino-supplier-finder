@@ -669,7 +669,7 @@ if search_btn:
         with st.status(label, expanded=True) as status:
             status.write(f"🚀 Starting search...")
             try:
-                n = run_search(c, p, extra, status_box=status)
+                n = run_search(c, p, extra, status_box=status, mode=search_mode)
                 total_new += n
                 status.update(label=f"✅ {label} — found {n} new", state="complete")
             except Exception as e:
@@ -919,6 +919,159 @@ with tab2:
             row = df_db[df_db["company"] == selected_company].iloc[0].to_dict() if selected_company else {}
 
             act1, act2 = st.columns(2)
+
+            # ── ENRICH ──
+            with act1:
+                st.markdown("**🔍 Enrich contacts**")
+                has_sd = bool(st.secrets.get("SCRAPINGDOG_API_KEY",""))
+                st.caption(f"{'🐕 ScrapingDog + Claude (JS render)' if has_sd else '⚠️ web_search only — add SCRAPINGDOG_API_KEY for better results'}")
+                if st.button("🔍 Find contacts", key="enrich_btn", use_container_width=True):
+                    with st.status(f"Enriching {selected_company}...", expanded=True) as enrich_status:
+                        try:
+                            found = {}
+                            company_url = row.get("url","")
+                            company_addr = row.get("address","")
+
+                            if has_sd and company_url:
+                                enrich_status.write(f"🐕 ScrapingDog → {company_url}/contact ...")
+                                found = enrich_with_scrapingdog(selected_company, company_url, company_addr)
+
+                            # fallback: web_search if ScrapingDog found nothing
+                            if not any(found.values()):
+                                enrich_status.write("🔍 Fallback: web_search...")
+                                client = get_anthropic_client()
+                                enrich_prompt = (
+                                    f"Find direct contact info for: {selected_company}\n"
+                                    f"Website: {company_url}\nAddress: {company_addr}\n\n"
+                                    f"Search /contact page, Alibaba, Made-in-China, LinkedIn.\n"
+                                    f"Return ONLY JSON: {{\"email\":\"\",\"phone\":\"\",\"whatsapp\":\"\",\"contact_person\":\"\"}}"
+                                )
+                                resp = client.messages.create(
+                                    model=MODEL, max_tokens=400,
+                                    tools=[{"type": "web_search_20250305", "name": "web_search"}],
+                                    messages=[{"role": "user", "content": enrich_prompt}]
+                                )
+                                txt = " ".join(b.text for b in resp.content if b.type == "text")
+                                m = re.search(r"\{[^{}]*\}", txt)
+                                if m:
+                                    found = {k: clean_contact(v) for k, v in json.loads(m.group(0)).items()}
+
+                            updates = {k: v for k, v in found.items() if v}
+                            if updates and "id" in row:
+                                with get_db() as conn:
+                                    with conn.cursor() as cur:
+                                        for col, val in updates.items():
+                                            cur.execute(f"UPDATE merino_suppliers SET {col}=%s WHERE id=%s",
+                                                        (val, row["id"]))
+                                    conn.commit()
+                                st.session_state["db_rev"] = st.session_state.get("db_rev", 0) + 1
+                                enrich_status.update(label=f"✅ Found: {updates}", state="complete")
+                                st.rerun()
+                            else:
+                                enrich_status.update(label="⚠️ No contacts found", state="complete")
+                        except Exception as e:
+                            enrich_status.update(label=f"❌ {e}", state="error")
+
+            # ── EMAIL GENERATOR ──
+            with act2:
+                st.markdown("**✉️ Email generator**")
+                st.caption("AI writes outreach email based on supplier profile")
+                email_lang = st.selectbox("Language", ["English", "Chinese (中文)"], key="email_lang")
+                if st.button("✉️ Generate email", key="email_btn", use_container_width=True):
+                    with st.spinner("Writing email..."):
+                        try:
+                            client = get_anthropic_client()
+                            lang_note = "Write in Chinese (Mandarin)" if "Chinese" in email_lang else "Write in English"
+                            email_prompt = (
+                                f"Write a professional B2B outreach email to a merino wool supplier.\n"
+                                f"Our brand: merino.tech — premium merino wool clothing, Amazon FBA, US/EU markets.\n\n"
+                                f"Supplier: {selected_company}\n"
+                                f"Products: {row.get('products','')}\n"
+                                f"Certs: {row.get('certs','')}\n"
+                                f"Contact: {row.get('contact_person', 'Sales Team')}\n\n"
+                                f"{lang_note}. Keep it concise (150-200 words). Ask about MOQ, pricing, samples.\n"
+                                f"Subject line included. Professional but friendly tone."
+                            )
+                            resp = client.messages.create(
+                                model=MODEL, max_tokens=600,
+                                messages=[{"role": "user", "content": email_prompt}]
+                            )
+                            email_text = resp.content[0].text
+                            st.session_state["_email_out"] = email_text
+                        except Exception as e:
+                            st.error(str(e))
+
+                if st.session_state.get("_email_out"):
+                    st.text_area("Generated email", st.session_state["_email_out"], height=280, key="email_out_area")
+                    if st.button("📋 Copy", key="copy_email"):
+                        st.toast("Select text → Ctrl+C")
+
+    except Exception as e:
+        st.error(f"DB read error: {e}")
+
+with tab3:
+    try:
+        df_ch = load_from_db()
+        if df_ch.empty:
+            st.info("No data yet.")
+        else:
+            df_ch["region"] = df_ch["address"].fillna("").apply(region_flag)
+            df_ch["has_contact"] = (
+                df_ch["email"].fillna("").str.len() +
+                df_ch["phone"].fillna("").str.len() > 0
+            ).map({True: "✅ With contacts", False: "❌ No contacts"})
+
+            PIE_COLORS = ["#16a34a","#2563eb","#d97706","#9333ea","#dc2626","#0891b2","#ca8a04","#9ca3af"]
+
+            c1, c2 = st.columns(2)
+            with c1:
+                reg = df_ch["region"].value_counts().reset_index()
+                reg.columns = ["Region", "Count"]
+                fig = px.pie(reg, names="Region", values="Count",
+                             title=f"By region  ({len(df_ch)} total)",
+                             color_discrete_sequence=PIE_COLORS,
+                             hole=0.35)
+                fig.update_traces(textposition="inside", textinfo="percent+label")
+                fig.update_layout(showlegend=False, margin=dict(t=50,b=10,l=10,r=10))
+                st.plotly_chart(fig, use_container_width=True)
+
+            with c2:
+                pri_colors = {"HIGH":"#16a34a","MEDIUM":"#d97706","LOW":"#9ca3af","UNKNOWN":"#e5e7eb"}
+                pri = df_ch["priority"].fillna("UNKNOWN").value_counts().reset_index()
+                pri.columns = ["Priority","Count"]
+                fig2 = px.pie(pri, names="Priority", values="Count",
+                              title="By priority",
+                              color="Priority",
+                              color_discrete_map=pri_colors,
+                              hole=0.35)
+                fig2.update_traces(textposition="inside", textinfo="percent+label")
+                fig2.update_layout(showlegend=False, margin=dict(t=50,b=10,l=10,r=10))
+                st.plotly_chart(fig2, use_container_width=True)
+
+            c3, c4 = st.columns(2)
+            with c3:
+                contact_df = df_ch["has_contact"].value_counts().reset_index()
+                contact_df.columns = ["Status","Count"]
+                fig3 = px.pie(contact_df, names="Status", values="Count",
+                              title="With contacts vs without",
+                              color_discrete_sequence=["#16a34a","#e5e7eb"],
+                              hole=0.35)
+                fig3.update_traces(textposition="inside", textinfo="percent+label")
+                fig3.update_layout(showlegend=False, margin=dict(t=50,b=10,l=10,r=10))
+                st.plotly_chart(fig3, use_container_width=True)
+
+            with c4:
+                prod = df_ch["search_product"].fillna("unknown").value_counts().reset_index()
+                prod.columns = ["Product","Count"]
+                fig4 = px.bar(prod, x="Count", y="Product", orientation="h",
+                              title="By product searched",
+                              color_discrete_sequence=["#2563eb"])
+                fig4.update_layout(yaxis=dict(autorange="reversed"),
+                                   margin=dict(t=50,b=10,l=10,r=10),
+                                   plot_bgcolor="white")
+                st.plotly_chart(fig4, use_container_width=True)
+    except Exception as e:
+        st.error(f"Chart error: {e}")
 
             # ── ENRICH ──
             with act1:
