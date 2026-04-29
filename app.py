@@ -55,11 +55,19 @@ priority = HIGH  → 100% merino, OEM/ODM, has direct contacts (email or phone)
            MEDIUM → merino blends or limited contact info
            LOW    → unclear merino focus or only platform listing
 
-IMPORTANT for contact fields (email, phone, whatsapp):
-- If you find a real direct value → put it (e.g. "info@company.com", "+86 138 0000 0000")
-- If NOT found → put "" (empty string)
-- NEVER put "Not listed", "N/A", "Contact through website", "Through platform" or similar text
-- Only real actionable values or empty string
+SEARCH STRATEGY — for each supplier you find, dig deeper:
+1. Visit the company website → find /contact page, /about page
+2. Check their Alibaba / Made-in-China / GlobalSources profile for direct contacts
+3. Search "[company name] email contact" or "[company name] sales manager"
+4. Look for patterns like info@, sales@, export@, inquiry@ + their domain
+
+CONTACT FIELDS RULES:
+- email: real email only (e.g. "sales@company.com") — never empty placeholders
+- phone: real number with country code (e.g. "+86 138 0000 0000")
+- whatsapp: WhatsApp number if explicitly mentioned
+- contact_person: name + role if found (e.g. "Lisa Wang, Sales Manager")
+- If truly not findable → use "" (empty string)
+- NEVER write: "Not listed", "N/A", "Contact through website", "Through platform", "Via Alibaba"
 
 Return ONLY a valid JSON array. No markdown. No explanation. No code fences."""
 
@@ -203,7 +211,8 @@ def run_search(country: str, product: str, extra: str):
         f"{('Extra requirements: ' + extra) if extra else ''} "
         f"Need OEM/ODM factories with direct contacts (email, phone, WhatsApp). "
         f"Search Alibaba, Made-in-China, GlobalSources, company websites. "
-        f"Return minimum 8–12 suppliers."
+        f"For each supplier: visit their website contact page and find direct email/phone. "
+        f"Return minimum 8–12 suppliers with as many direct contacts as possible."
     )
 
     client = get_anthropic_client()
@@ -301,7 +310,16 @@ with col2:
     product = st.multiselect("Product", PRODUCTS, default=["base layer / thermal underwear"], key="product",
                               placeholder="Select products...")
 with col3:
-    extra = st.text_input("Extra requirements", placeholder="Woolmark certified, low MOQ, no mulesing...")
+    QUICK_TAGS = [
+        "Woolmark certified", "low MOQ", "no mulesing",
+        "direct factory", "OCS organic", "GOTS certified",
+        "accepts samples", "18.5 micron superfine",
+        "OEKO-TEX certified", "RWS certified",
+    ]
+    tags = st.multiselect("Quick tags", QUICK_TAGS, key="tags", label_visibility="collapsed",
+                           placeholder="Quick tags (optional)...")
+    extra_custom = st.text_input("Extra requirements", placeholder="Or type custom...", label_visibility="collapsed")
+    extra = ", ".join(tags + ([extra_custom] if extra_custom.strip() else []))
 with col4:
     st.write("")
     search_btn = st.button("▶ Search", type="primary", use_container_width=True)
@@ -398,15 +416,44 @@ def render_table(df: pd.DataFrame, allow_edit: bool = False):
                  df.get("products","").fillna("").str.lower().str.contains(q))
     df_f = df[mask]
 
+    ec1, ec2, ec3, ec_gap = st.columns([1, 1, 1.5, 4])
+
+    # CSV download
+    csv_bytes = df_f[existing if "existing" not in dir() else [c for c in (["in_db","✉️","region","company","url","email","phone","whatsapp","products","certs","priority","status"] if "status" in df_f.columns else ["in_db","✉️","region","company","url","email","phone","whatsapp","products","certs","priority"]) if c in df_f.columns]].to_csv(index=False).encode()
+    with ec1:
+        st.download_button("⬇️ CSV", csv_bytes, "suppliers.csv", "text/csv", use_container_width=True)
+
+    # Excel download
+    import io
+    xlsx_buf = io.BytesIO()
+    df_f[[c for c in (["region","company","url","email","phone","whatsapp","products","certs","priority","status"] if "status" in df_f.columns else ["region","company","url","email","phone","whatsapp","products","certs","priority"]) if c in df_f.columns]].to_excel(xlsx_buf, index=False, engine="openpyxl")
+    xlsx_buf.seek(0)
+    with ec2:
+        st.download_button("⬇️ Excel", xlsx_buf.read(), "suppliers.xlsx",
+                           "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                           use_container_width=True)
+
+    # TSV for Google Sheets
+    with ec3:
+        tsv_cols = [c for c in ["region","company","url","email","phone","whatsapp","products","certs","priority"] if c in df_f.columns]
+        tsv = df_f[tsv_cols].to_csv(index=False, sep="\t")
+        st.code("📋 Ctrl+V → Sheets", language=None)
+        if st.button("Copy TSV", key=f"copy_{allow_edit}", use_container_width=False):
+            st.session_state["_tsv_clip"] = tsv
+            st.toast("Скопируй текст ниже → вставляй в Google Sheets")
+        if st.session_state.get("_tsv_clip"):
+            st.text_area("Select all → Ctrl+C", st.session_state["_tsv_clip"], height=60, key=f"tsv_{allow_edit}")
+
     st.caption(f"Showing **{len(df_f)}** of {len(df)} suppliers")
 
-    show_cols = ["✉️","region","company","url","email","phone","whatsapp","products","certs","priority"]
+    show_cols = ["in_db","✉️","region","company","url","email","phone","whatsapp","products","certs","priority"]
     if "status" in df_f.columns:
         show_cols = ["✉️","region","company","status","url","email","phone","whatsapp","products","certs","priority"]
     existing = [c for c in show_cols if c in df_f.columns]
 
     cfg = {
         "url": st.column_config.LinkColumn(),
+        "in_db": st.column_config.TextColumn("DB", width="small"),
         "✉️": st.column_config.TextColumn("📬", width="small"),
         "region": st.column_config.TextColumn("Region", width="small"),
         "company": st.column_config.TextColumn("Company", width="medium"),
@@ -445,7 +492,18 @@ def render_table(df: pd.DataFrame, allow_edit: bool = False):
 
 with tab1:
     if st.session_state.results:
-        render_table(pd.DataFrame(st.session_state.results), allow_edit=False)
+        df_s = pd.DataFrame(st.session_state.results).copy()
+        # mark rows already in DB
+        try:
+            df_existing = load_from_db()
+            db_keys = set((df_existing["company"].fillna("") + df_existing["url"].fillna("")).str.lower())
+        except Exception:
+            db_keys = set()
+        df_s["in_db"] = df_s.apply(
+            lambda r: "✅ in DB" if (str(r.get("company","")) + str(r.get("url",""))).lower() in db_keys else "🆕 New",
+            axis=1
+        )
+        render_table(df_s, allow_edit=False)
     else:
         st.info("No results yet — select Country + Product and click **▶ Search**")
 
