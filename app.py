@@ -6,6 +6,7 @@ from datetime import datetime
 import pandas as pd
 import psycopg2
 from psycopg2.extras import execute_values
+import plotly.express as px
 
 # ── PAGE CONFIG ──────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -54,6 +55,12 @@ priority = HIGH  → 100% merino, OEM/ODM, has direct contacts (email or phone)
            MEDIUM → merino blends or limited contact info
            LOW    → unclear merino focus or only platform listing
 
+IMPORTANT for contact fields (email, phone, whatsapp):
+- If you find a real direct value → put it (e.g. "info@company.com", "+86 138 0000 0000")
+- If NOT found → put "" (empty string)
+- NEVER put "Not listed", "N/A", "Contact through website", "Through platform" or similar text
+- Only real actionable values or empty string
+
 Return ONLY a valid JSON array. No markdown. No explanation. No code fences."""
 
 # ── HELPERS ──────────────────────────────────────────────────────────────────
@@ -86,6 +93,8 @@ def init_db():
                     priority    TEXT,
                     search_country TEXT,
                     search_product TEXT,
+                    status      TEXT DEFAULT 'New',
+                    notes       TEXT DEFAULT '',
                     created_at  TIMESTAMP DEFAULT NOW(),
                     UNIQUE(company, url)
                 )
@@ -151,6 +160,23 @@ def region_flag(addr: str) -> str:
     if re.search(r"australia|sydney|melbourne", a):
         return "🇦🇺 Australia"
     return "🌐 Other"
+
+def clean_contact(val: str) -> str:
+    """Remove placeholder text, keep only real contact values."""
+    if not val:
+        return ""
+    junk = ["not listed","not specified","n/a","na","contact through","through website",
+            "through platform","platform","contact form","via website","see website",
+            "globalsources","made-in-china","alibaba","contact for details","available on"]
+    v = val.strip()
+    if any(j in v.lower() for j in junk):
+        return ""
+    return v
+
+def clean_row(r: dict) -> dict:
+    for f in ["email","phone","whatsapp"]:
+        r[f] = clean_contact(r.get(f,""))
+    return r
 
 # ── INIT DB ──────────────────────────────────────────────────────────────────
 try:
@@ -218,14 +244,34 @@ def run_search(country: str, product: str, extra: str):
 
     parsed = json.loads(m.group(0))
 
-    # dedup
-    existing = {(r.get("company", "") + r.get("url", "")).lower()
-                for r in st.session_state.results}
-    fresh = [r for r in parsed
-             if (r.get("company", "") + r.get("url", "")).lower() not in existing]
+    # dedup vs session
+    existing_session = {(r.get("company", "") + r.get("url", "")).lower()
+                        for r in st.session_state.results}
+    # dedup vs DB
+    try:
+        df_existing = load_from_db()
+        existing_db = set((df_existing["company"].fillna("") + df_existing["url"].fillna("")).str.lower())
+    except Exception:
+        existing_db = set()
+
+    already_in_db = []
+    fresh = []
+    for r in parsed:
+        key = (r.get("company","") + r.get("url","")).lower()
+        if key in existing_session:
+            pass  # skip session dup
+        elif key in existing_db:
+            already_in_db.append(r.get("company","?"))
+        else:
+            fresh.append(clean_row(r))
 
     st.session_state.results.extend(fresh)
-    add_log(f"Added **{len(fresh)}** new suppliers (duplicates skipped: {len(parsed) - len(fresh)})")
+    msg_parts = [f"Found **{len(parsed)}** total"]
+    if fresh:
+        msg_parts.append(f"**{len(fresh)}** new added")
+    if already_in_db:
+        msg_parts.append(f"**{len(already_in_db)}** already in DB: {', '.join(already_in_db[:5])}")
+    add_log(" · ".join(msg_parts))
 
     # save to postgres
     try:
@@ -304,12 +350,94 @@ if st.session_state.log:
 # ── RESULTS — tabs: session / database / charts ───────────────────────────────
 tab1, tab2, tab3 = st.tabs(["🔍 Session results", "🗄️ Database (all)", "📊 Charts"])
 
+def render_table(df: pd.DataFrame, allow_edit: bool = False):
+    """Render filtered supplier table."""
+    if df.empty:
+        st.info("No data.")
+        return
+
+    df = df.copy()
+    df["region"] = df.get("address", pd.Series([""] * len(df))).fillna("").apply(region_flag)
+    # mark rows with real contacts
+    df["✉️"] = df.apply(lambda r: "✅" if (r.get("email","") or r.get("phone","") or r.get("whatsapp","")) else "—", axis=1)
+
+    # ── FILTERS ──
+    fc1, fc2, fc3, fc4 = st.columns([1.5, 1.5, 1.5, 2])
+    with fc1:
+        regions = ["All"] + sorted(df["region"].unique().tolist())
+        f_region = st.selectbox("Region", regions, key=f"fr_{allow_edit}")
+    with fc2:
+        pris = ["All"] + [p for p in ["HIGH","MEDIUM","LOW"] if p in df.get("priority", pd.Series()).values]
+        f_pri = st.selectbox("Priority", pris, key=f"fp_{allow_edit}")
+    with fc3:
+        f_contact = st.selectbox("Contacts", ["All","✅ Has contacts","— No contacts"], key=f"fc_{allow_edit}")
+    with fc4:
+        f_search = st.text_input("🔍 Search company / product", key=f"fs_{allow_edit}")
+
+    # apply filters
+    mask = pd.Series([True] * len(df), index=df.index)
+    if f_region != "All":
+        mask &= df["region"] == f_region
+    if f_pri != "All":
+        mask &= df.get("priority", pd.Series([""] * len(df), index=df.index)).fillna("") == f_pri
+    if f_contact == "✅ Has contacts":
+        mask &= df["✉️"] == "✅"
+    elif f_contact == "— No contacts":
+        mask &= df["✉️"] == "—"
+    if f_search:
+        q = f_search.lower()
+        mask &= (df.get("company","").fillna("").str.lower().str.contains(q) |
+                 df.get("products","").fillna("").str.lower().str.contains(q))
+    df_f = df[mask]
+
+    st.caption(f"Showing **{len(df_f)}** of {len(df)} suppliers")
+
+    show_cols = ["✉️","region","company","email","phone","whatsapp","products","certs","priority"]
+    if "status" in df_f.columns:
+        show_cols = ["✉️","region","company","status","email","phone","whatsapp","products","certs","priority"]
+    existing = [c for c in show_cols if c in df_f.columns]
+
+    cfg = {
+        "url": st.column_config.LinkColumn(),
+        "✉️": st.column_config.TextColumn("📬", width="small"),
+        "region": st.column_config.TextColumn("Region", width="small"),
+        "company": st.column_config.TextColumn("Company", width="medium"),
+        "email": st.column_config.TextColumn("Email", width="medium"),
+        "phone": st.column_config.TextColumn("Phone", width="small"),
+        "priority": st.column_config.TextColumn("Pri", width="small"),
+    }
+    if allow_edit and "status" in df_f.columns:
+        cfg["status"] = st.column_config.SelectboxColumn(
+            "Status", options=["New","Contacted","Replied","In progress","Rejected","Done"],
+            width="small"
+        )
+
+    if allow_edit:
+        edited = st.data_editor(df_f[existing], use_container_width=True, height=520,
+                                hide_index=True, column_config=cfg)
+        # save status changes back to DB
+        if "status" in edited.columns and "id" in df_f.columns:
+            changed = edited[edited["status"] != df_f.loc[edited.index,"status"]]
+            if not changed.empty:
+                try:
+                    with get_db() as conn:
+                        with conn.cursor() as cur:
+                            for idx, row in changed.iterrows():
+                                orig_id = df_f.loc[idx,"id"]
+                                cur.execute("UPDATE merino_suppliers SET status=%s WHERE id=%s",
+                                            (row["status"], orig_id))
+                        conn.commit()
+                    load_from_db.clear()
+                    st.toast("Status saved ✅")
+                except Exception as e:
+                    st.warning(f"Save error: {e}")
+    else:
+        st.dataframe(df_f[existing], use_container_width=True, height=520,
+                     hide_index=True, column_config=cfg)
+
 with tab1:
     if st.session_state.results:
-        df_s = pd.DataFrame(st.session_state.results)
-        df_s.insert(0, "region", df_s.get("address", pd.Series([""] * len(df_s))).apply(region_flag))
-        st.dataframe(df_s, use_container_width=True, height=500, hide_index=True,
-            column_config={"url": st.column_config.LinkColumn()})
+        render_table(pd.DataFrame(st.session_state.results), allow_edit=False)
     else:
         st.info("No results yet — select Country + Product and click **▶ Search**")
 
@@ -319,10 +447,7 @@ with tab2:
         if df_db.empty:
             st.info("Database is empty — run a search first.")
         else:
-            df_db.insert(0, "region", df_db["address"].fillna("").apply(region_flag))
-            st.caption(f"Total in DB: **{len(df_db)}** suppliers")
-            st.dataframe(df_db, use_container_width=True, height=500, hide_index=True,
-                column_config={"url": st.column_config.LinkColumn()})
+            render_table(df_db, allow_edit=True)
     except Exception as e:
         st.error(f"DB read error: {e}")
 
@@ -333,37 +458,59 @@ with tab3:
             st.info("No data yet.")
         else:
             df_ch["region"] = df_ch["address"].fillna("").apply(region_flag)
-            c1, c2 = st.columns(2)
+            df_ch["has_contact"] = (
+                df_ch["email"].fillna("").str.len() +
+                df_ch["phone"].fillna("").str.len() > 0
+            ).map({True: "✅ With contacts", False: "❌ No contacts"})
 
+            PIE_COLORS = ["#16a34a","#2563eb","#d97706","#9333ea","#dc2626","#0891b2","#ca8a04","#9ca3af"]
+
+            c1, c2 = st.columns(2)
             with c1:
-                st.subheader("By region")
                 reg = df_ch["region"].value_counts().reset_index()
                 reg.columns = ["Region", "Count"]
-                st.bar_chart(reg.set_index("Region"), color="#16a34a")
+                fig = px.pie(reg, names="Region", values="Count",
+                             title=f"By region  ({len(df_ch)} total)",
+                             color_discrete_sequence=PIE_COLORS,
+                             hole=0.35)
+                fig.update_traces(textposition="inside", textinfo="percent+label")
+                fig.update_layout(showlegend=False, margin=dict(t=50,b=10,l=10,r=10))
+                st.plotly_chart(fig, use_container_width=True)
 
             with c2:
-                st.subheader("By priority")
+                pri_colors = {"HIGH":"#16a34a","MEDIUM":"#d97706","LOW":"#9ca3af","UNKNOWN":"#e5e7eb"}
                 pri = df_ch["priority"].fillna("UNKNOWN").value_counts().reset_index()
-                pri.columns = ["Priority", "Count"]
-                colors = {"HIGH": "#16a34a", "MEDIUM": "#d97706", "LOW": "#9ca3af"}
-                st.bar_chart(pri.set_index("Priority"))
+                pri.columns = ["Priority","Count"]
+                fig2 = px.pie(pri, names="Priority", values="Count",
+                              title="By priority",
+                              color="Priority",
+                              color_discrete_map=pri_colors,
+                              hole=0.35)
+                fig2.update_traces(textposition="inside", textinfo="percent+label")
+                fig2.update_layout(showlegend=False, margin=dict(t=50,b=10,l=10,r=10))
+                st.plotly_chart(fig2, use_container_width=True)
 
             c3, c4 = st.columns(2)
             with c3:
-                st.subheader("By product searched")
-                prod = df_ch["search_product"].fillna("unknown").value_counts().reset_index()
-                prod.columns = ["Product", "Count"]
-                st.bar_chart(prod.set_index("Product"))
+                contact_df = df_ch["has_contact"].value_counts().reset_index()
+                contact_df.columns = ["Status","Count"]
+                fig3 = px.pie(contact_df, names="Status", values="Count",
+                              title="With contacts vs without",
+                              color_discrete_sequence=["#16a34a","#e5e7eb"],
+                              hole=0.35)
+                fig3.update_traces(textposition="inside", textinfo="percent+label")
+                fig3.update_layout(showlegend=False, margin=dict(t=50,b=10,l=10,r=10))
+                st.plotly_chart(fig3, use_container_width=True)
 
             with c4:
-                st.subheader("With contacts vs without")
-                df_ch["has_contact"] = (
-                    df_ch["email"].fillna("").str.len() +
-                    df_ch["phone"].fillna("").str.len() > 0
-                )
-                contact_data = df_ch["has_contact"].value_counts().reset_index()
-                contact_data.columns = ["Has contact", "Count"]
-                contact_data["Has contact"] = contact_data["Has contact"].map({True: "✅ Yes", False: "❌ No"})
-                st.bar_chart(contact_data.set_index("Has contact"))
+                prod = df_ch["search_product"].fillna("unknown").value_counts().reset_index()
+                prod.columns = ["Product","Count"]
+                fig4 = px.bar(prod, x="Count", y="Product", orientation="h",
+                              title="By product searched",
+                              color_discrete_sequence=["#2563eb"])
+                fig4.update_layout(yaxis=dict(autorange="reversed"),
+                                   margin=dict(t=50,b=10,l=10,r=10),
+                                   plot_bgcolor="white")
+                st.plotly_chart(fig4, use_container_width=True)
     except Exception as e:
         st.error(f"Chart error: {e}")
