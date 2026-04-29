@@ -266,10 +266,6 @@ if clear_btn:
     st.session_state.log = []
     st.rerun()
 
-if db_refresh:
-    load_from_db.clear()
-    st.rerun()
-
 # ── METRICS ──────────────────────────────────────────────────────────────────
 m1, m2, m3, m4 = st.columns(4)
 with m1:
@@ -282,6 +278,10 @@ with m3:
     st.metric("HIGH priority", high)
 with m4:
     db_refresh = st.button("🔄 Refresh DB", use_container_width=True)
+
+if db_refresh:
+    load_from_db.clear()
+    st.rerun()
 
 # ── RUN SEARCH ────────────────────────────────────────────────────────────────
 if search_btn:
