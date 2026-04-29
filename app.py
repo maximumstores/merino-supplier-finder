@@ -6,6 +6,8 @@ import gspread
 from google.oauth2.service_account import Credentials
 from datetime import datetime
 import pandas as pd
+import psycopg2
+from psycopg2.extras import execute_values
 
 # ── PAGE CONFIG ──────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -70,6 +72,73 @@ def get_gspread_client():
     )
     return gspread.authorize(creds)
 
+# ── POSTGRESQL ───────────────────────────────────────────────────────────────
+def get_db():
+    return psycopg2.connect(st.secrets["DATABASE_URL"], sslmode="require")
+
+def init_db():
+    """Create table if not exists."""
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS merino_suppliers (
+                    id          SERIAL PRIMARY KEY,
+                    company     TEXT,
+                    url         TEXT,
+                    email       TEXT,
+                    phone       TEXT,
+                    whatsapp    TEXT,
+                    address     TEXT,
+                    contact_person TEXT,
+                    description TEXT,
+                    products    TEXT,
+                    certs       TEXT,
+                    moq         TEXT,
+                    priority    TEXT,
+                    search_country TEXT,
+                    search_product TEXT,
+                    created_at  TIMESTAMP DEFAULT NOW(),
+                    UNIQUE(company, url)
+                )
+            """)
+        conn.commit()
+
+def save_to_db(rows: list, country: str, product: str) -> int:
+    """Insert rows, skip duplicates. Returns count inserted."""
+    if not rows:
+        return 0
+    values = [
+        (
+            r.get("company",""), r.get("url",""), r.get("email",""),
+            r.get("phone",""), r.get("whatsapp",""), r.get("address",""),
+            r.get("contact_person",""), r.get("description",""),
+            r.get("products",""), r.get("certs",""), r.get("moq",""),
+            r.get("priority",""), country, product,
+        )
+        for r in rows
+    ]
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            execute_values(cur, """
+                INSERT INTO merino_suppliers
+                  (company,url,email,phone,whatsapp,address,contact_person,
+                   description,products,certs,moq,priority,search_country,search_product)
+                VALUES %s
+                ON CONFLICT (company, url) DO NOTHING
+            """, values)
+            inserted = cur.rowcount
+        conn.commit()
+    return inserted
+
+@st.cache_data(ttl=60)
+def load_from_db() -> pd.DataFrame:
+    """Load all suppliers from DB."""
+    with get_db() as conn:
+        return pd.read_sql(
+            "SELECT * FROM merino_suppliers ORDER BY created_at DESC",
+            conn
+        )
+
 def region_flag(addr: str) -> str:
     a = (addr or "").lower()
     if re.search(r"china|shanghai|beijing|guangdong|jiangsu|zhejiang|ningbo|shenzhen|suzhou|guangzhou", a):
@@ -93,6 +162,12 @@ def region_flag(addr: str) -> str:
     if re.search(r"australia|sydney|melbourne", a):
         return "🇦🇺 Australia"
     return "🌐 Other"
+
+# ── INIT DB ──────────────────────────────────────────────────────────────────
+try:
+    init_db()
+except Exception as e:
+    st.warning(f"DB init warning: {e}")
 
 # ── SESSION STATE ────────────────────────────────────────────────────────────
 if "results" not in st.session_state:
@@ -162,6 +237,15 @@ def run_search(country: str, product: str, extra: str):
 
     st.session_state.results.extend(fresh)
     add_log(f"Added **{len(fresh)}** new suppliers (duplicates skipped: {len(parsed) - len(fresh)})")
+
+    # save to postgres
+    try:
+        inserted = save_to_db(fresh, country, product)
+        add_log(f"Saved **{inserted}** rows → PostgreSQL")
+        load_from_db.clear()
+    except Exception as e:
+        add_log(f"DB write warning: {e}", "warn")
+
     return len(fresh)
 
 
@@ -279,33 +363,69 @@ if st.session_state.log:
         for line in reversed(st.session_state.log[-15:]):
             st.markdown(line)
 
-# ── RESULTS TABLE ─────────────────────────────────────────────────────────────
-if st.session_state.results:
-    df = pd.DataFrame(st.session_state.results)
+# ── RESULTS — tabs: session / database / charts ───────────────────────────────
+tab1, tab2, tab3 = st.tabs(["🔍 Session results", "🗄️ Database (all)", "📊 Charts"])
 
-    # add region column
-    df.insert(0, "region", df.get("address", pd.Series([""] * len(df))).apply(region_flag))
+with tab1:
+    if st.session_state.results:
+        df_s = pd.DataFrame(st.session_state.results)
+        df_s.insert(0, "region", df_s.get("address", pd.Series([""] * len(df_s))).apply(region_flag))
+        st.dataframe(df_s, use_container_width=True, height=500, hide_index=True,
+            column_config={"url": st.column_config.LinkColumn()})
+    else:
+        st.info("No results yet — select Country + Product and click **▶ Search**")
 
-    # reorder + rename
-    display_cols = ["region"] + [c for c in COLS if c in df.columns]
-    df = df[display_cols]
-    df.columns = ["Region"] + [h for h, c in zip(HEADERS, COLS) if c in st.session_state.results[0]]
+with tab2:
+    try:
+        df_db = load_from_db()
+        if df_db.empty:
+            st.info("Database is empty — run a search first.")
+        else:
+            df_db.insert(0, "region", df_db["address"].fillna("").apply(region_flag))
+            st.caption(f"Total in DB: **{len(df_db)}** suppliers")
+            st.dataframe(df_db, use_container_width=True, height=500, hide_index=True,
+                column_config={"url": st.column_config.LinkColumn()})
+    except Exception as e:
+        st.error(f"DB read error: {e}")
 
-    st.dataframe(
-        df,
-        use_container_width=True,
-        height=600,
-        column_config={
-            "Region": st.column_config.TextColumn(width="small"),
-            "Company": st.column_config.TextColumn(width="medium"),
-            "URL": st.column_config.LinkColumn(width="medium"),
-            "Email": st.column_config.TextColumn(width="medium"),
-            "Phone": st.column_config.TextColumn(width="small"),
-            "WhatsApp": st.column_config.TextColumn(width="small"),
-            "Priority": st.column_config.TextColumn(width="small"),
-            "Description": st.column_config.TextColumn(width="large"),
-        },
-        hide_index=True,
-    )
-else:
-    st.info("No results yet — select Country + Product and click **▶ Search**")
+with tab3:
+    try:
+        df_ch = load_from_db()
+        if df_ch.empty:
+            st.info("No data yet.")
+        else:
+            df_ch["region"] = df_ch["address"].fillna("").apply(region_flag)
+            c1, c2 = st.columns(2)
+
+            with c1:
+                st.subheader("By region")
+                reg = df_ch["region"].value_counts().reset_index()
+                reg.columns = ["Region", "Count"]
+                st.bar_chart(reg.set_index("Region"), color="#16a34a")
+
+            with c2:
+                st.subheader("By priority")
+                pri = df_ch["priority"].fillna("UNKNOWN").value_counts().reset_index()
+                pri.columns = ["Priority", "Count"]
+                colors = {"HIGH": "#16a34a", "MEDIUM": "#d97706", "LOW": "#9ca3af"}
+                st.bar_chart(pri.set_index("Priority"))
+
+            c3, c4 = st.columns(2)
+            with c3:
+                st.subheader("By product searched")
+                prod = df_ch["search_product"].fillna("unknown").value_counts().reset_index()
+                prod.columns = ["Product", "Count"]
+                st.bar_chart(prod.set_index("Product"))
+
+            with c4:
+                st.subheader("With contacts vs without")
+                df_ch["has_contact"] = (
+                    df_ch["email"].fillna("").str.len() +
+                    df_ch["phone"].fillna("").str.len() > 0
+                )
+                contact_data = df_ch["has_contact"].value_counts().reset_index()
+                contact_data.columns = ["Has contact", "Count"]
+                contact_data["Has contact"] = contact_data["Has contact"].map({True: "✅ Yes", False: "❌ No"})
+                st.bar_chart(contact_data.set_index("Has contact"))
+    except Exception as e:
+        st.error(f"Chart error: {e}")
