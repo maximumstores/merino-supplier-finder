@@ -773,9 +773,25 @@ def render_table(df: pd.DataFrame, allow_edit: bool = False):
         df_f["_sort"] = df_f["⭐"].str.extract(r"(\d+)").astype(float).fillna(0)
         df_f = df_f.sort_values("_sort", ascending=False).drop(columns=["_sort"])
 
+    # ── DELETE selected ──
+    if allow_edit and "id" in df_f.columns:
+        with ec_gap:
+            del_company = st.selectbox("🗑️ Delete company", ["—"] + df_f["company"].dropna().tolist(),
+                                       key=f"del_{allow_edit}", label_visibility="collapsed")
+            if del_company != "—":
+                if st.button(f"🗑️ Delete: {del_company[:30]}", key=f"delbtn_{allow_edit}", type="secondary"):
+                    row_id = df_f[df_f["company"] == del_company]["id"].iloc[0]
+                    with get_db() as conn:
+                        with conn.cursor() as cur:
+                            cur.execute("DELETE FROM merino_suppliers WHERE id=%s", (int(row_id),))
+                        conn.commit()
+                    st.session_state["db_rev"] = st.session_state.get("db_rev", 0) + 1
+                    st.toast(f"Deleted: {del_company}")
+                    st.rerun()
+
     st.caption(f"Showing **{len(df_f)}** of {len(df)} suppliers")
 
-    show_cols = ["⭐","in_db","✉️","region","company","url","email","phone","whatsapp","products","certs","priority"]
+    show_cols = ["⭐","in_db","✉️","region","company","status","url","email","phone","whatsapp","products","certs","priority"]
     if "status" in df_f.columns:
         show_cols = ["⭐","✉️","region","company","status","url","email","phone","whatsapp","products","certs","priority"]
     existing = [c for c in show_cols if c in df_f.columns]
