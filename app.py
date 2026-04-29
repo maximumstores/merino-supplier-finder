@@ -186,6 +186,36 @@ def clean_row(r: dict) -> dict:
         r[f] = clean_contact(r.get(f,""))
     return r
 
+def calc_score(r) -> int:
+    """Score a supplier row. Max ~20."""
+    s = 0
+    # contacts
+    if r.get("email",""):      s += 3
+    if r.get("phone",""):      s += 2
+    if r.get("whatsapp",""):   s += 1
+    if r.get("contact_person",""): s += 1
+    # priority
+    pri = str(r.get("priority","")).upper()
+    if pri == "HIGH":   s += 3
+    elif pri == "MEDIUM": s += 1
+    # certs
+    certs = str(r.get("certs","")).lower()
+    if "woolmark" in certs: s += 2
+    if "oeko"     in certs: s += 1
+    if "rws"      in certs: s += 1
+    if "bsci"     in certs: s += 1
+    if "gots"     in certs: s += 1
+    # other
+    if r.get("moq",""):  s += 1
+    if r.get("url",""):  s += 1
+    return s
+
+def score_emoji(s: int) -> str:
+    if s >= 12: return f"⭐⭐⭐ {s}"
+    if s >= 7:  return f"⭐⭐ {s}"
+    if s >= 3:  return f"⭐ {s}"
+    return f"· {s}"
+
 # ── INIT DB ──────────────────────────────────────────────────────────────────
 try:
     init_db()
@@ -336,6 +366,25 @@ def run_search(country: str, product: str, extra: str, status_box=None):
 # ── UI ────────────────────────────────────────────────────────────────────────
 st.markdown("## 🐑 Merino Supplier Finder")
 st.caption(f"merino.tech internal · {MODEL} · web_search")
+
+with st.expander("📖 How it works", expanded=False):
+    st.markdown("""
+**Workflow в 5 шагов:**
+
+| Шаг | Действие | Где |
+|-----|----------|-----|
+| 1️⃣ | Выбери страну + продукт → **▶ Search** | Search tab |
+| 2️⃣ | Проверь результаты, отфильтруй по ✅ контактам и ⭐ Score | Session results |
+| 3️⃣ | Для компаний без контактов — выбери → **🔍 Find contacts** | Database (all) |
+| 4️⃣ | Выбери поставщика → **✉️ Generate email** → отправь | Database (all) |
+| 5️⃣ | Обновляй **статус** по каждому: Contacted → Replied → Deal | Database (all) |
+
+**⭐ Score** = чем выше тем лучше: email/phone/WhatsApp + сертификаты (Woolmark, OEKO-TEX, RWS) + priority HIGH  
+**🔍 Enrich** = Claude сам идёт на сайт компании и ищет прямые контакты  
+**✉️ Email** = AI пишет outreach письмо под профиль конкретного поставщика (EN или CN)  
+**Status** = твой личный трекинг: кому написал, кто ответил, с кем идут переговоры
+    """)
+
 st.divider()
 
 # ── SEARCH CONTROLS ───────────────────────────────────────────────────────────
@@ -428,6 +477,7 @@ def render_table(df: pd.DataFrame, allow_edit: bool = False):
     df["region"] = df.get("address", pd.Series([""] * len(df))).fillna("").apply(region_flag)
     # mark rows with real contacts
     df["✉️"] = df.apply(lambda r: "✅" if (r.get("email","") or r.get("phone","") or r.get("whatsapp","")) else "—", axis=1)
+    df["⭐"] = df.apply(lambda r: score_emoji(calc_score(r)), axis=1)
 
     # ── FILTERS ──
     fc1, fc2, fc3, fc4 = st.columns([1.5, 1.5, 1.5, 2])
@@ -480,13 +530,14 @@ def render_table(df: pd.DataFrame, allow_edit: bool = False):
 
     st.caption(f"Showing **{len(df_f)}** of {len(df)} suppliers")
 
-    show_cols = ["in_db","✉️","region","company","url","email","phone","whatsapp","products","certs","priority"]
+    show_cols = ["⭐","in_db","✉️","region","company","url","email","phone","whatsapp","products","certs","priority"]
     if "status" in df_f.columns:
-        show_cols = ["✉️","region","company","status","url","email","phone","whatsapp","products","certs","priority"]
+        show_cols = ["⭐","✉️","region","company","status","url","email","phone","whatsapp","products","certs","priority"]
     existing = [c for c in show_cols if c in df_f.columns]
 
     cfg = {
         "url": st.column_config.LinkColumn(),
+        "⭐": st.column_config.TextColumn("Score", width="small"),
         "in_db": st.column_config.TextColumn("DB", width="small"),
         "✉️": st.column_config.TextColumn("📬", width="small"),
         "region": st.column_config.TextColumn("Region", width="small"),
@@ -497,7 +548,7 @@ def render_table(df: pd.DataFrame, allow_edit: bool = False):
     }
     if allow_edit and "status" in df_f.columns:
         cfg["status"] = st.column_config.SelectboxColumn(
-            "Status", options=["New","Contacted","Replied","In progress","Rejected","Done"],
+            "Status", options=["New","Contacted","Replied","Negotiating","Deal","Rejected"],
             width="small"
         )
 
@@ -547,7 +598,110 @@ with tab2:
         if df_db.empty:
             st.info("Database is empty — run a search first.")
         else:
+            # ── WORKFLOW SUMMARY ──
+            if "status" in df_db.columns:
+                status_counts = df_db["status"].fillna("New").value_counts()
+                STATUS_ORDER = ["New","Contacted","Replied","Negotiating","Deal","Rejected"]
+                STATUS_EMOJI = {"New":"🆕","Contacted":"📤","Replied":"📥","Negotiating":"🤝","Deal":"✅","Rejected":"❌"}
+                scols = st.columns(len(STATUS_ORDER))
+                for i, s in enumerate(STATUS_ORDER):
+                    cnt = status_counts.get(s, 0)
+                    scols[i].metric(f"{STATUS_EMOJI[s]} {s}", cnt)
+                st.divider()
+
             render_table(df_db, allow_edit=True)
+
+            st.divider()
+
+            # ── ENRICH + EMAIL GENERATOR ──
+            company_names = df_db["company"].dropna().tolist()
+            sel_col1, sel_col2 = st.columns([3, 1])
+            with sel_col1:
+                selected_company = st.selectbox("Select company for Enrich / Email", company_names, key="sel_company")
+            
+            row = df_db[df_db["company"] == selected_company].iloc[0].to_dict() if selected_company else {}
+
+            act1, act2 = st.columns(2)
+
+            # ── ENRICH ──
+            with act1:
+                st.markdown("**🔍 Enrich contacts**")
+                st.caption("Claude searches the web for direct email, phone, contact person")
+                if st.button("🔍 Find contacts", key="enrich_btn", use_container_width=True):
+                    with st.status(f"Enriching {selected_company}...", expanded=True) as enrich_status:
+                        enrich_status.write("Searching website, LinkedIn, B2B platforms...")
+                        try:
+                            client = get_anthropic_client()
+                            enrich_prompt = (
+                                f"Find direct contact information for this company: {selected_company}\n"
+                                f"Website: {row.get('url','')}\n"
+                                f"Address: {row.get('address','')}\n\n"
+                                f"Search: their /contact page, Alibaba profile, Made-in-China profile, LinkedIn.\n"
+                                f"Find: direct email (sales@/export@/info@), phone with country code, WhatsApp, sales manager name.\n"
+                                f"Return JSON: {{\"email\": \"\", \"phone\": \"\", \"whatsapp\": \"\", \"contact_person\": \"\"}}"
+                            )
+                            resp = client.messages.create(
+                                model=MODEL, max_tokens=512,
+                                tools=[{"type": "web_search_20250305", "name": "web_search"}],
+                                messages=[{"role": "user", "content": enrich_prompt}]
+                            )
+                            txt = " ".join(b.text for b in resp.content if b.type == "text")
+                            m = re.search(r"\{[^{}]*\}", txt)
+                            if m:
+                                found = json.loads(m.group(0))
+                                found = {k: clean_contact(v) for k, v in found.items()}
+                                updates = {k: v for k, v in found.items() if v}
+                                if updates and "id" in row:
+                                    with get_db() as conn:
+                                        with conn.cursor() as cur:
+                                            for col, val in updates.items():
+                                                cur.execute(f"UPDATE merino_suppliers SET {col}=%s WHERE id=%s",
+                                                            (val, row["id"]))
+                                        conn.commit()
+                                    load_from_db.clear()
+                                    enrich_status.update(label=f"✅ Found: {updates}", state="complete")
+                                    st.rerun()
+                                else:
+                                    enrich_status.update(label="⚠️ No new contacts found", state="complete")
+                            else:
+                                enrich_status.update(label="❌ Could not parse response", state="error")
+                        except Exception as e:
+                            enrich_status.update(label=f"❌ {e}", state="error")
+
+            # ── EMAIL GENERATOR ──
+            with act2:
+                st.markdown("**✉️ Email generator**")
+                st.caption("AI writes outreach email based on supplier profile")
+                email_lang = st.selectbox("Language", ["English", "Chinese (中文)"], key="email_lang")
+                if st.button("✉️ Generate email", key="email_btn", use_container_width=True):
+                    with st.spinner("Writing email..."):
+                        try:
+                            client = get_anthropic_client()
+                            lang_note = "Write in Chinese (Mandarin)" if "Chinese" in email_lang else "Write in English"
+                            email_prompt = (
+                                f"Write a professional B2B outreach email to a merino wool supplier.\n"
+                                f"Our brand: merino.tech — premium merino wool clothing, Amazon FBA, US/EU markets.\n\n"
+                                f"Supplier: {selected_company}\n"
+                                f"Products: {row.get('products','')}\n"
+                                f"Certs: {row.get('certs','')}\n"
+                                f"Contact: {row.get('contact_person', 'Sales Team')}\n\n"
+                                f"{lang_note}. Keep it concise (150-200 words). Ask about MOQ, pricing, samples.\n"
+                                f"Subject line included. Professional but friendly tone."
+                            )
+                            resp = client.messages.create(
+                                model=MODEL, max_tokens=600,
+                                messages=[{"role": "user", "content": email_prompt}]
+                            )
+                            email_text = resp.content[0].text
+                            st.session_state["_email_out"] = email_text
+                        except Exception as e:
+                            st.error(str(e))
+
+                if st.session_state.get("_email_out"):
+                    st.text_area("Generated email", st.session_state["_email_out"], height=280, key="email_out_area")
+                    if st.button("📋 Copy", key="copy_email"):
+                        st.toast("Select text → Ctrl+C")
+
     except Exception as e:
         st.error(f"DB read error: {e}")
 
