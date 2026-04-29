@@ -295,9 +295,11 @@ st.divider()
 col1, col2, col3, col4, col5 = st.columns([1.4, 1.6, 2.5, 0.9, 0.7])
 
 with col1:
-    country = st.selectbox("Country", COUNTRIES, key="country")
+    country = st.multiselect("Country", COUNTRIES[:-1], default=["China"], key="country",
+                              placeholder="Select countries...")
 with col2:
-    product = st.selectbox("Product", PRODUCTS, key="product")
+    product = st.multiselect("Product", PRODUCTS, default=["base layer / thermal underwear"], key="product",
+                              placeholder="Select products...")
 with col3:
     extra = st.text_input("Extra requirements", placeholder="Woolmark certified, low MOQ, no mulesing...")
 with col4:
@@ -331,14 +333,20 @@ if db_refresh:
 
 # ── RUN SEARCH ────────────────────────────────────────────────────────────────
 if search_btn:
-    with st.spinner(f"Searching for **{product}** in **{country}**..."):
-        try:
-            n = run_search(country, product, extra)
-            if n:
-                st.success(f"Found {n} new suppliers!")
-        except Exception as e:
-            st.error(f"Error: {e}")
-            add_log(str(e), "error")
+    countries = country if country else ["China"]
+    products  = product if product else ["base layer / thermal underwear"]
+    total_new = 0
+    for c in countries:
+        for p in products:
+            with st.spinner(f"Searching: **{p}** / **{c}**..."):
+                try:
+                    n = run_search(c, p, extra)
+                    total_new += n
+                except Exception as e:
+                    st.error(f"Error ({c}/{p}): {e}")
+                    add_log(str(e), "error")
+    if total_new:
+        st.success(f"Done! Added {total_new} new suppliers.")
 
 
 # ── LOG ───────────────────────────────────────────────────────────────────────
@@ -392,9 +400,9 @@ def render_table(df: pd.DataFrame, allow_edit: bool = False):
 
     st.caption(f"Showing **{len(df_f)}** of {len(df)} suppliers")
 
-    show_cols = ["✉️","region","company","email","phone","whatsapp","products","certs","priority"]
+    show_cols = ["✉️","region","company","url","email","phone","whatsapp","products","certs","priority"]
     if "status" in df_f.columns:
-        show_cols = ["✉️","region","company","status","email","phone","whatsapp","products","certs","priority"]
+        show_cols = ["✉️","region","company","status","url","email","phone","whatsapp","products","certs","priority"]
     existing = [c for c in show_cols if c in df_f.columns]
 
     cfg = {
