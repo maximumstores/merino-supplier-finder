@@ -399,94 +399,128 @@ def enrich_with_scrapingdog(company: str, url: str, address: str) -> dict:
 def run_search(country: str, product: str, extra: str, status_box=None, mode: str = "auto"):
     where = "globally" if country == "All countries" else f"in {country}"
 
-    # ── CACHE CHECK ──
-    cache_days = 7
-    if was_searched_recently(country, product, cache_days):
-        add_log(f"⏭️ Skipped (searched in last {cache_days}d): **{product}** / **{country}**", "warn")
+    # cache check
+    if was_searched_recently(country, product, 7):
+        add_log(f"⏭️ Skipped (< 7d): **{product}** / **{country}**", "warn")
         return 0
 
     add_log(f"Starting search: **{product}** / **{country}**")
 
-    # lazy init Claude — only when needed
-    def get_client():
-        return get_anthropic_client()
+    sd_key  = st.secrets.get("SCRAPINGDOG_API_KEY", "")
+    use_sd  = bool(sd_key) and mode in ("🐕 ScrapingDog", "🔄 Auto (SD → Claude fallback)")
+    use_ant = mode in ("🤖 Claude web_search", "🔄 Auto (SD → Claude fallback)")
 
-    # parse JSON — multiple fallback strategies
-    add_log(f"Response length: {len(full_text)} chars")
+    research_text = ""
 
-    parsed = None
+    # ── STEP 1: gather research ──────────────────────────────────────────────
+    if use_sd:
+        if status_box: status_box.update(label="🐕 ScrapingDog searching...")
+        queries = [
+            f"merino wool {product} manufacturer {country} OEM factory",
+            f"merino wool {product} supplier {country} contact email wholesale",
+            f"merino {country} clothing factory export direct",
+        ]
+        if extra:
+            queries.append(f"merino {product} {country} {extra}")
+        parts = []
+        for i, q in enumerate(queries):
+            if status_box: status_box.update(label=f"🐕 [{i+1}/{len(queries)}] {q[:45]}...")
+            r = scrapingdog_search(q, num=10)
+            if r: parts.append(r)
+        research_text = "\n\n".join(parts)
+        add_log(f"🐕 {len(queries)} queries · {len(research_text)} chars")
 
-    # strategy 1: find JSON array directly
-    m = re.search(r"\[[\s\S]*\]", full_text)
-    if m:
-        try:
-            parsed = json.loads(m.group(0))
-        except Exception:
-            pass
+    if not research_text.strip() and use_ant:
+        add_log("🔍 Claude web_search...", "warn")
+        if status_box: status_box.update(label="🔍 Claude web_search...")
+        client = get_anthropic_client()
+        r1 = client.messages.create(
+            model=MODEL, max_tokens=3000,
+            tools=[{"type": "web_search_20250305", "name": "web_search"}],
+            messages=[{"role": "user", "content":
+                f"Find merino wool {product} manufacturers {where}. "
+                f"{('Extra: ' + extra) if extra else ''} "
+                f"Search Alibaba, Made-in-China, GlobalSources. Find 8-12 suppliers with contacts."
+            }],
+        )
+        n_searches = sum(1 for b in r1.content if b.type == "tool_use")
+        research_text = " ".join(b.text for b in r1.content if hasattr(b,"text") and b.text)
+        add_log(f"🔍 {n_searches} searches · {len(research_text)} chars")
 
-    # strategy 2: strip markdown fences
-    if parsed is None:
-        cleaned = re.sub(r"```(?:json)?\s*", "", full_text).replace("```", "").strip()
-        m2 = re.search(r"\[[\s\S]*\]", cleaned)
-        if m2:
-            try:
-                parsed = json.loads(m2.group(0))
-            except Exception:
-                pass
-
-    # strategy 3: find first { ... } object and wrap in array
-    if parsed is None:
-        m3 = re.search(r"(\{[\s\S]*\})", full_text)
-        if m3:
-            try:
-                parsed = [json.loads(m3.group(0))]
-            except Exception:
-                pass
-
-    if not parsed:
-        snippet = full_text[:300].replace("\n", " ")
-        add_log(f"No JSON found. Response preview: {snippet}", "error")
+    if not research_text.strip():
+        add_log("No results from any source", "error")
         return 0
 
+    # ── STEP 2: parse to structured data ─────────────────────────────────────
+    if status_box: status_box.update(label="✍️ Formatting results...")
+
+    # if ScrapingDog-only mode and no Claude credits → use Python parser
+    ant_key = st.secrets.get("ANTHROPIC_API_KEY", "")
+    if mode == "🐕 ScrapingDog" and not ant_key:
+        parsed = parse_sd_results_to_json(research_text, country, product)
+        add_log(f"🐕 Python parser: {len(parsed)} suppliers")
+    else:
+        # Claude formats JSON via assistant prefill
+        try:
+            client = get_anthropic_client()
+            r2 = client.messages.create(
+                model=MODEL, max_tokens=4000,
+                messages=[
+                    {"role": "user", "content": (
+                        f"Extract suppliers from this research into a JSON array.\n\n"
+                        f"{research_text[:6000]}\n\n"
+                        f"Each object: company, url, email, phone, whatsapp, address, "
+                        f"contact_person, description, products, certs, moq, "
+                        f"priority(HIGH/MEDIUM/LOW). Missing = empty string."
+                    )},
+                    {"role": "assistant", "content": "["},
+                ],
+            )
+            raw = " ".join(b.text for b in r2.content if b.type == "text")
+            full_text = "[" + raw
+            add_log(f"JSON: {len(full_text)} chars")
+            # parse
+            m = re.search(r"\[[\s\S]*\]", full_text)
+            parsed = json.loads(m.group(0)) if m else []
+        except Exception as e:
+            add_log(f"Claude formatting failed: {e} → Python parser fallback", "warn")
+            parsed = parse_sd_results_to_json(research_text, country, product)
+
+    if not parsed:
+        add_log("No suppliers extracted", "error")
+        return 0
     if not isinstance(parsed, list):
         parsed = [parsed]
 
-    # dedup vs session
-    existing_session = {(r.get("company", "") + r.get("url", "")).lower()
-                        for r in st.session_state.results}
-    # dedup vs DB
+    # ── DEDUP + SAVE ─────────────────────────────────────────────────────────
+    existing_session = {(r.get("company","") + r.get("url","")).lower() for r in st.session_state.results}
     try:
-        df_existing = load_from_db()
-        existing_db = set((df_existing["company"].fillna("") + df_existing["url"].fillna("")).str.lower())
+        df_ex = load_from_db()
+        existing_db = set((df_ex["company"].fillna("") + df_ex["url"].fillna("")).str.lower())
     except Exception:
         existing_db = set()
 
-    already_in_db = []
-    fresh = []
+    already_in_db, fresh = [], []
     for r in parsed:
         key = (r.get("company","") + r.get("url","")).lower()
         if key in existing_session:
-            pass  # skip session dup
+            pass
         elif key in existing_db:
             already_in_db.append(r.get("company","?"))
         else:
             fresh.append(clean_row(r))
 
     st.session_state.results.extend(fresh)
-    msg_parts = [f"Found **{len(parsed)}** total"]
-    if fresh:
-        msg_parts.append(f"**{len(fresh)}** new added")
-    if already_in_db:
-        msg_parts.append(f"**{len(already_in_db)}** already in DB: {', '.join(already_in_db[:5])}")
-    add_log(" · ".join(msg_parts))
+    parts = [f"Found **{len(parsed)}** total"]
+    if fresh: parts.append(f"**{len(fresh)}** new")
+    if already_in_db: parts.append(f"**{len(already_in_db)}** in DB: {', '.join(already_in_db[:3])}")
+    add_log(" · ".join(parts))
 
-    # save to postgres
     try:
-        inserted = save_to_db(fresh, country, product)
-        add_log(f"Saved **{inserted}** rows → PostgreSQL")
+        save_to_db(fresh, country, product)
         st.session_state["db_rev"] = st.session_state.get("db_rev", 0) + 1
     except Exception as e:
-        add_log(f"DB write warning: {e}", "warn")
+        add_log(f"DB: {e}", "warn")
 
     return len(fresh)
 
