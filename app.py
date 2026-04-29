@@ -69,7 +69,13 @@ CONTACT FIELDS RULES:
 - If truly not findable → use "" (empty string)
 - NEVER write: "Not listed", "N/A", "Contact through website", "Through platform", "Via Alibaba"
 
-Return ONLY a valid JSON array. No markdown. No explanation. No code fences."""
+CRITICAL OUTPUT RULE:
+Your ENTIRE response must be ONLY a JSON array starting with [ and ending with ].
+Do NOT write any text before or after the JSON.
+Do NOT explain what you found.
+Do NOT say "I'll search..." or "Let me search..."
+Just output the JSON array directly. Nothing else.
+Example of correct response: [{"company":"X","url":"...","email":"..."}]"""
 
 # ── HELPERS ──────────────────────────────────────────────────────────────────
 def get_anthropic_client():
@@ -314,7 +320,7 @@ def run_search(country: str, product: str, extra: str, status_box=None):
         f"Need OEM/ODM factories with direct contacts (email, phone, WhatsApp). "
         f"Search Alibaba, Made-in-China, GlobalSources, company websites. "
         f"For each supplier: visit their website contact page and find direct email/phone. "
-        f"Return minimum 8–12 suppliers with as many direct contacts as possible."
+        f"Return minimum 8–12 suppliers with as many direct contacts as possible.\n\nREMEMBER: Output ONLY the JSON array. Start your response with [ and end with ]. No text before or after."
     )
 
     # ── CACHE CHECK ──
@@ -332,7 +338,7 @@ def run_search(country: str, product: str, extra: str, status_box=None):
 
     with client.messages.stream(
         model=MODEL,
-        max_tokens=2048,
+        max_tokens=3000,
         system=SYSTEM_PROMPT,
         tools=[{"type": "web_search_20250305", "name": "web_search"}],
         messages=[{"role": "user", "content": user_msg}],
