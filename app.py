@@ -244,6 +244,54 @@ def add_log(msg: str, level: str = "info"):
     st.session_state.log.append(f"`{ts}` {icon} {msg}")
 
 # ── SEARCH FUNCTION ───────────────────────────────────────────────────────────
+def parse_sd_results_to_json(sd_text: str, country: str, product: str) -> list:
+    """Parse ScrapingDog search results into supplier dicts without Claude."""
+    import re
+    suppliers = []
+    # split by result blocks (each starts with "- Title | URL")
+    blocks = re.split(r'\n(?=- )', sd_text.strip())
+    for block in blocks:
+        if not block.strip() or not block.startswith("- "):
+            continue
+        lines = block.strip().split("\n")
+        header = lines[0][2:]  # remove "- "
+        parts  = header.split(" | ", 1)
+        title  = parts[0].strip() if parts else ""
+        url    = parts[1].strip() if len(parts) > 1 else ""
+        snippet = " ".join(l.strip() for l in lines[1:])
+
+        if not title:
+            continue
+
+        # extract email
+        email_m = re.search(r'[\w.+-]+@[\w-]+\.[\w.]+', block)
+        email   = email_m.group(0) if email_m else ""
+
+        # extract phone
+        phone_m = re.search(r'(\+?\d[\d\s\-().]{6,18}\d)', block)
+        phone   = phone_m.group(0).strip() if phone_m else ""
+
+        # skip irrelevant results (marketplaces, news, etc.)
+        skip_kw = ["alibaba.com/trade", "amazon.", "ebay.", "wikipedia", "youtube", "news", "blog"]
+        if any(k in url.lower() for k in skip_kw):
+            continue
+
+        suppliers.append({
+            "company":        title,
+            "url":            url,
+            "email":          clean_contact(email),
+            "phone":          clean_contact(phone),
+            "whatsapp":       "",
+            "address":        country,
+            "contact_person": "",
+            "description":    snippet[:200],
+            "products":       product,
+            "certs":          "",
+            "moq":            "",
+            "priority":       "MEDIUM",
+        })
+    return suppliers
+
 def was_searched_recently(country: str, product: str, days: int = 7) -> bool:
     """Return True if this country+product combo was searched within N days."""
     try:
