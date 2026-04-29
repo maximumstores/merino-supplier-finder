@@ -234,6 +234,63 @@ def add_log(msg: str, level: str = "info"):
     st.session_state.log.append(f"`{ts}` {icon} {msg}")
 
 # ── SEARCH FUNCTION ───────────────────────────────────────────────────────────
+def scrape_contact_page(url: str) -> str:
+    """Fetch a page via ScrapingDog (JS rendered). Returns HTML text or empty string."""
+    import urllib.request, urllib.parse
+    try:
+        api_key = st.secrets.get("SCRAPINGDOG_API_KEY", "")
+        if not api_key or not url:
+            return ""
+        encoded = urllib.parse.quote(url, safe="")
+        endpoint = f"https://api.scrapingdog.com/scraper?api_key={api_key}&url={encoded}&dynamic=true"
+        req = urllib.request.Request(endpoint, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return r.read().decode("utf-8", errors="ignore")[:15000]
+    except Exception:
+        return ""
+
+def enrich_with_scrapingdog(company: str, url: str, address: str) -> dict:
+    """Use ScrapingDog + Claude to extract contacts from company website."""
+    import urllib.parse
+
+    # Build list of URLs to try
+    urls_to_try = []
+    if url:
+        base = url.rstrip("/")
+        urls_to_try += [f"{base}/contact", f"{base}/contact-us", f"{base}/about", url]
+
+    html_collected = ""
+    for u in urls_to_try[:3]:
+        html = scrape_contact_page(u)
+        if html:
+            html_collected += f"\n\n--- PAGE: {u} ---\n{html[:4000]}"
+            if "@" in html or "tel:" in html.lower():
+                break  # found something useful
+
+    if not html_collected:
+        return {}
+
+    # Ask Claude to extract contacts from HTML
+    client = get_anthropic_client()
+    extract_prompt = (
+        f"Extract contact information from this HTML for company: {company}\n"
+        f"Address: {address}\n\n"
+        f"HTML content:\n{html_collected[:8000]}\n\n"
+        f"Find: email address, phone number, WhatsApp, sales manager name.\n"
+        f"Return ONLY JSON: {{\"email\": \"\", \"phone\": \"\", \"whatsapp\": \"\", \"contact_person\": \"\"}}"
+        f"Use empty string if not found. NEVER use placeholder text."
+    )
+    resp = client.messages.create(
+        model=MODEL, max_tokens=300,
+        messages=[{"role": "user", "content": extract_prompt}]
+    )
+    txt = " ".join(b.text for b in resp.content if b.type == "text")
+    m = re.search(r"\{[^{}]*\}", txt)
+    if m:
+        found = json.loads(m.group(0))
+        return {k: clean_contact(v) for k, v in found.items()}
+    return {}
+
 def run_search(country: str, product: str, extra: str, status_box=None):
     where = "globally" if country == "All countries" else f"in {country}"
     user_msg = (
@@ -632,45 +689,52 @@ with tab2:
             # ── ENRICH ──
             with act1:
                 st.markdown("**🔍 Enrich contacts**")
-                st.caption("Claude searches the web for direct email, phone, contact person")
+                has_sd = bool(st.secrets.get("SCRAPINGDOG_API_KEY",""))
+                st.caption(f"{'🐕 ScrapingDog + Claude (JS render)' if has_sd else '⚠️ web_search only — add SCRAPINGDOG_API_KEY for better results'}")
                 if st.button("🔍 Find contacts", key="enrich_btn", use_container_width=True):
                     with st.status(f"Enriching {selected_company}...", expanded=True) as enrich_status:
-                        enrich_status.write("Searching website, LinkedIn, B2B platforms...")
                         try:
-                            client = get_anthropic_client()
-                            enrich_prompt = (
-                                f"Find direct contact information for this company: {selected_company}\n"
-                                f"Website: {row.get('url','')}\n"
-                                f"Address: {row.get('address','')}\n\n"
-                                f"Search: their /contact page, Alibaba profile, Made-in-China profile, LinkedIn.\n"
-                                f"Find: direct email (sales@/export@/info@), phone with country code, WhatsApp, sales manager name.\n"
-                                f"Return JSON: {{\"email\": \"\", \"phone\": \"\", \"whatsapp\": \"\", \"contact_person\": \"\"}}"
-                            )
-                            resp = client.messages.create(
-                                model=MODEL, max_tokens=512,
-                                tools=[{"type": "web_search_20250305", "name": "web_search"}],
-                                messages=[{"role": "user", "content": enrich_prompt}]
-                            )
-                            txt = " ".join(b.text for b in resp.content if b.type == "text")
-                            m = re.search(r"\{[^{}]*\}", txt)
-                            if m:
-                                found = json.loads(m.group(0))
-                                found = {k: clean_contact(v) for k, v in found.items()}
-                                updates = {k: v for k, v in found.items() if v}
-                                if updates and "id" in row:
-                                    with get_db() as conn:
-                                        with conn.cursor() as cur:
-                                            for col, val in updates.items():
-                                                cur.execute(f"UPDATE merino_suppliers SET {col}=%s WHERE id=%s",
-                                                            (val, row["id"]))
-                                        conn.commit()
-                                    load_from_db.clear()
-                                    enrich_status.update(label=f"✅ Found: {updates}", state="complete")
-                                    st.rerun()
-                                else:
-                                    enrich_status.update(label="⚠️ No new contacts found", state="complete")
+                            found = {}
+                            company_url = row.get("url","")
+                            company_addr = row.get("address","")
+
+                            if has_sd and company_url:
+                                enrich_status.write(f"🐕 ScrapingDog → {company_url}/contact ...")
+                                found = enrich_with_scrapingdog(selected_company, company_url, company_addr)
+
+                            # fallback: web_search if ScrapingDog found nothing
+                            if not any(found.values()):
+                                enrich_status.write("🔍 Fallback: web_search...")
+                                client = get_anthropic_client()
+                                enrich_prompt = (
+                                    f"Find direct contact info for: {selected_company}\n"
+                                    f"Website: {company_url}\nAddress: {company_addr}\n\n"
+                                    f"Search /contact page, Alibaba, Made-in-China, LinkedIn.\n"
+                                    f"Return ONLY JSON: {{\"email\":\"\",\"phone\":\"\",\"whatsapp\":\"\",\"contact_person\":\"\"}}"
+                                )
+                                resp = client.messages.create(
+                                    model=MODEL, max_tokens=400,
+                                    tools=[{"type": "web_search_20250305", "name": "web_search"}],
+                                    messages=[{"role": "user", "content": enrich_prompt}]
+                                )
+                                txt = " ".join(b.text for b in resp.content if b.type == "text")
+                                m = re.search(r"\{[^{}]*\}", txt)
+                                if m:
+                                    found = {k: clean_contact(v) for k, v in json.loads(m.group(0)).items()}
+
+                            updates = {k: v for k, v in found.items() if v}
+                            if updates and "id" in row:
+                                with get_db() as conn:
+                                    with conn.cursor() as cur:
+                                        for col, val in updates.items():
+                                            cur.execute(f"UPDATE merino_suppliers SET {col}=%s WHERE id=%s",
+                                                        (val, row["id"]))
+                                    conn.commit()
+                                load_from_db.clear()
+                                enrich_status.update(label=f"✅ Found: {updates}", state="complete")
+                                st.rerun()
                             else:
-                                enrich_status.update(label="❌ Could not parse response", state="error")
+                                enrich_status.update(label="⚠️ No contacts found", state="complete")
                         except Exception as e:
                             enrich_status.update(label=f"❌ {e}", state="error")
 
