@@ -430,16 +430,16 @@ with st.expander("📖 How it works", expanded=False):
 
 | Шаг | Действие | Где |
 |-----|----------|-----|
-| 1️⃣ | Выбери страну + продукт → **▶ Search** | Search tab |
+| 1️⃣ | Выбери страну + продукт → **▶ Search** | Search controls |
 | 2️⃣ | Проверь результаты, отфильтруй по ✅ контактам и ⭐ Score | Session results |
-| 3️⃣ | Для компаний без контактов — выбери → **🔍 Find contacts** | Database (all) |
+| 3️⃣ | Нажми **🐕 Enrich All** — ScrapingDog сам найдёт контакты для всех без email/phone | Database (all) |
 | 4️⃣ | Выбери поставщика → **✉️ Generate email** → отправь | Database (all) |
-| 5️⃣ | Обновляй **статус** по каждому: Contacted → Replied → Deal | Database (all) |
+| 5️⃣ | Обновляй **Status** по каждому: Contacted → Replied → Negotiating → Deal | Database (all) |
 
 **⭐ Score** = чем выше тем лучше: email/phone/WhatsApp + сертификаты (Woolmark, OEKO-TEX, RWS) + priority HIGH  
-**🔍 Enrich** = Claude сам идёт на сайт компании и ищет прямые контакты  
-**✉️ Email** = AI пишет outreach письмо под профиль конкретного поставщика (EN или CN)  
-**Status** = твой личный трекинг: кому написал, кто ответил, с кем идут переговоры
+**🐕 Enrich All** = одна кнопка — ScrapingDog заходит на сайт каждой компании без контактов, Claude читает страницу и извлекает email/phone. Всё автоматически дописывается в базу  
+**✉️ Email** = AI пишет персональное outreach письмо под профиль конкретного поставщика (EN или CN)  
+**Status** = твой трекинг воронки: кому написал, кто ответил, с кем переговоры, кто закрыт
     """)
 
 st.divider()
@@ -477,17 +477,37 @@ if clear_btn:
     st.rerun()
 
 # ── METRICS ──────────────────────────────────────────────────────────────────
-m1, m2, m3, m4 = st.columns(4)
+# session stats
+_total   = len(st.session_state.results)
+_with_c  = sum(1 for r in st.session_state.results if r.get("email") or r.get("phone"))
+_high    = sum(1 for r in st.session_state.results if r.get("priority") == "HIGH")
+with_contacts = _with_c
+
+# DB stats
+try:
+    _df_stat = load_from_db()
+    _db_total  = len(_df_stat)
+    _db_with_c = int((_df_stat["email"].fillna("").str.len() + _df_stat["phone"].fillna("").str.len()) > 0).sum() if _db_total else 0
+    _db_no_c   = _db_total - _db_with_c
+    _db_high   = int((_df_stat["priority"].fillna("") == "HIGH").sum()) if _db_total else 0
+    _db_pct    = f"{round(_db_with_c/_db_total*100)}%" if _db_total else "—"
+except Exception:
+    _db_total = _db_with_c = _db_no_c = _db_high = 0
+    _db_pct = "—"
+
+m1, m2, m3, m4, m5, m6 = st.columns(6)
 with m1:
-    st.metric("Total found", len(st.session_state.results))
+    st.metric("🗄️ DB total", _db_total)
 with m2:
-    with_contacts = sum(1 for r in st.session_state.results if r.get("email") or r.get("phone"))
-    st.metric("With contacts", with_contacts)
+    st.metric("✅ With contacts", _db_with_c, delta=_db_pct, delta_color="off")
 with m3:
-    high = sum(1 for r in st.session_state.results if r.get("priority") == "HIGH")
-    st.metric("HIGH priority", high)
+    st.metric("❌ No contacts", _db_no_c)
 with m4:
-    db_refresh = st.button("🔄 Refresh DB", use_container_width=True)
+    st.metric("⭐ HIGH", _db_high)
+with m5:
+    st.metric("🔍 Session", _total, delta=f"+{_total}" if _total else None)
+with m6:
+    db_refresh = st.button("🔄 Refresh", use_container_width=True)
 
 if db_refresh:
     load_from_db.clear()
