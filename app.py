@@ -1106,4 +1106,4 @@ with tab3:
                                    plot_bgcolor="white")
                 st.plotly_chart(fig4, use_container_width=True)
     except Exception as e:
-        st.error(f"Chart error: {e}") 
+        st.error(f"Chart error: {e}")
