@@ -204,7 +204,7 @@ def add_log(msg: str, level: str = "info"):
     st.session_state.log.append(f"`{ts}` {icon} {msg}")
 
 # ── SEARCH FUNCTION ───────────────────────────────────────────────────────────
-def run_search(country: str, product: str, extra: str):
+def run_search(country: str, product: str, extra: str, status_box=None):
     where = "globally" if country == "All countries" else f"in {country}"
     user_msg = (
         f"Find merino wool {product} manufacturers {where}. "
@@ -232,9 +232,15 @@ def run_search(country: str, product: str, extra: str):
         for event in stream:
             if hasattr(event, "type"):
                 if event.type == "content_block_start":
-                    if hasattr(event, "content_block") and event.content_block.type == "tool_use":
+                    cb = getattr(event, "content_block", None)
+                    if cb and cb.type == "tool_use":
                         search_count += 1
-        # get final message
+                        if status_box:
+                            status_box.update(label=f"🔍 Web search #{search_count}...")
+                        add_log(f"🔍 Web search #{search_count}")
+                    elif cb and cb.type == "text":
+                        if status_box:
+                            status_box.update(label="✍️ Generating results...")
         msg = stream.get_final_message()
 
     if search_count:
@@ -245,13 +251,45 @@ def run_search(country: str, product: str, extra: str):
         if block.type == "text":
             full_text += block.text
 
-    # parse JSON
+    # parse JSON — multiple fallback strategies
+    add_log(f"Response length: {len(full_text)} chars")
+
+    parsed = None
+
+    # strategy 1: find JSON array directly
     m = re.search(r"\[[\s\S]*\]", full_text)
-    if not m:
-        add_log("No JSON array found in response", "error")
+    if m:
+        try:
+            parsed = json.loads(m.group(0))
+        except Exception:
+            pass
+
+    # strategy 2: strip markdown fences
+    if parsed is None:
+        cleaned = re.sub(r"```(?:json)?\s*", "", full_text).replace("```", "").strip()
+        m2 = re.search(r"\[[\s\S]*\]", cleaned)
+        if m2:
+            try:
+                parsed = json.loads(m2.group(0))
+            except Exception:
+                pass
+
+    # strategy 3: find first { ... } object and wrap in array
+    if parsed is None:
+        m3 = re.search(r"(\{[\s\S]*\})", full_text)
+        if m3:
+            try:
+                parsed = [json.loads(m3.group(0))]
+            except Exception:
+                pass
+
+    if not parsed:
+        snippet = full_text[:300].replace("\n", " ")
+        add_log(f"No JSON found. Response preview: {snippet}", "error")
         return 0
 
-    parsed = json.loads(m.group(0))
+    if not isinstance(parsed, list):
+        parsed = [parsed]
 
     # dedup vs session
     existing_session = {(r.get("company", "") + r.get("url", "")).lower()
@@ -354,17 +392,21 @@ if search_btn:
     countries = country if country else ["China"]
     products  = product if product else ["base layer / thermal underwear"]
     total_new = 0
-    for c in countries:
-        for p in products:
-            with st.spinner(f"Searching: **{p}** / **{c}**..."):
-                try:
-                    n = run_search(c, p, extra)
-                    total_new += n
-                except Exception as e:
-                    st.error(f"Error ({c}/{p}): {e}")
-                    add_log(str(e), "error")
+    combos = [(c, p) for c in countries for p in products]
+    for i, (c, p) in enumerate(combos):
+        label = f"[{i+1}/{len(combos)}] {p} / {c}"
+        with st.status(label, expanded=True) as status:
+            status.write(f"🚀 Starting search...")
+            try:
+                n = run_search(c, p, extra, status_box=status)
+                total_new += n
+                status.update(label=f"✅ {label} — found {n} new", state="complete")
+            except Exception as e:
+                status.update(label=f"❌ {label} — error", state="error")
+                st.error(str(e))
+                add_log(str(e), "error")
     if total_new:
-        st.success(f"Done! Added {total_new} new suppliers.")
+        st.success(f"✅ Done! Added **{total_new}** new suppliers.")
 
 
 # ── LOG ───────────────────────────────────────────────────────────────────────
