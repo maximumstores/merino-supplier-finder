@@ -416,33 +416,32 @@ def render_table(df: pd.DataFrame, allow_edit: bool = False):
                  df.get("products","").fillna("").str.lower().str.contains(q))
     df_f = df[mask]
 
-    ec1, ec2, ec3, ec_gap = st.columns([1, 1, 1.5, 4])
-
-    # CSV download
-    csv_bytes = df_f[existing if "existing" not in dir() else [c for c in (["in_db","✉️","region","company","url","email","phone","whatsapp","products","certs","priority","status"] if "status" in df_f.columns else ["in_db","✉️","region","company","url","email","phone","whatsapp","products","certs","priority"]) if c in df_f.columns]].to_csv(index=False).encode()
-    with ec1:
-        st.download_button("⬇️ CSV", csv_bytes, "suppliers.csv", "text/csv", use_container_width=True)
-
-    # Excel download
+    # ── EXPORT COLS (defined before use) ──
     import io
-    xlsx_buf = io.BytesIO()
-    df_f[[c for c in (["region","company","url","email","phone","whatsapp","products","certs","priority","status"] if "status" in df_f.columns else ["region","company","url","email","phone","whatsapp","products","certs","priority"]) if c in df_f.columns]].to_excel(xlsx_buf, index=False, engine="openpyxl")
-    xlsx_buf.seek(0)
+    base_cols = ["region","company","url","email","phone","whatsapp","products","certs","priority"]
+    if "status" in df_f.columns:
+        base_cols = ["status"] + base_cols
+    export_cols = [c for c in base_cols if c in df_f.columns]
+    df_export = df_f[export_cols]
+
+    ec1, ec2, ec3, ec_gap = st.columns([1, 1, 2, 3])
+    with ec1:
+        csv_bytes = df_export.to_csv(index=False).encode()
+        st.download_button("⬇️ CSV", csv_bytes, "suppliers.csv", "text/csv", use_container_width=True)
     with ec2:
+        xlsx_buf = io.BytesIO()
+        df_export.to_excel(xlsx_buf, index=False, engine="openpyxl")
+        xlsx_buf.seek(0)
         st.download_button("⬇️ Excel", xlsx_buf.read(), "suppliers.xlsx",
                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                            use_container_width=True)
-
-    # TSV for Google Sheets
     with ec3:
-        tsv_cols = [c for c in ["region","company","url","email","phone","whatsapp","products","certs","priority"] if c in df_f.columns]
-        tsv = df_f[tsv_cols].to_csv(index=False, sep="\t")
-        st.code("📋 Ctrl+V → Sheets", language=None)
-        if st.button("Copy TSV", key=f"copy_{allow_edit}", use_container_width=False):
-            st.session_state["_tsv_clip"] = tsv
-            st.toast("Скопируй текст ниже → вставляй в Google Sheets")
-        if st.session_state.get("_tsv_clip"):
-            st.text_area("Select all → Ctrl+C", st.session_state["_tsv_clip"], height=60, key=f"tsv_{allow_edit}")
+        tsv = df_export.to_csv(index=False, sep="\t")
+        if st.button("📋 TSV → Google Sheets", key=f"copy_{allow_edit}", use_container_width=True):
+            st.session_state[f"_tsv_{allow_edit}"] = tsv
+        if st.session_state.get(f"_tsv_{allow_edit}"):
+            st.text_area("Выдели всё (Ctrl+A) → Ctrl+C → вставляй в Sheets",
+                         st.session_state[f"_tsv_{allow_edit}"], height=55, key=f"tsv_{allow_edit}")
 
     st.caption(f"Showing **{len(df_f)}** of {len(df)} suppliers")
 
