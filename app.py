@@ -244,40 +244,59 @@ def add_log(msg: str, level: str = "info"):
     st.session_state.log.append(f"`{ts}` {icon} {msg}")
 
 # ── SEARCH FUNCTION ───────────────────────────────────────────────────────────
+def domain_to_company(url: str) -> str:
+    """Extract readable company name from domain."""
+    import re
+    try:
+        domain = url.split("//")[-1].split("/")[0].lower()
+        domain = re.sub(r'^www\.', '', domain)
+        name   = domain.split(".")[0]
+        # camelCase split + capitalize
+        name = re.sub(r'[-_]', ' ', name)
+        return name.title()
+    except Exception:
+        return url
+
 def parse_sd_results_to_json(sd_text: str, country: str, product: str) -> list:
     """Parse ScrapingDog search results into supplier dicts without Claude."""
     import re
     suppliers = []
-    # split by result blocks (each starts with "- Title | URL")
+    skip_kw = ["alibaba.com/trade", "amazon.", "ebay.", "wikipedia",
+               "youtube", "news", "blog", "europages", "made-in-china.com",
+               "globalsources", "thomasnet", "kompass", "yellowpages"]
+
     blocks = re.split(r'\n(?=- )', sd_text.strip())
     for block in blocks:
         if not block.strip() or not block.startswith("- "):
             continue
-        lines = block.strip().split("\n")
-        header = lines[0][2:]  # remove "- "
+        lines  = block.strip().split("\n")
+        header = lines[0][2:]
         parts  = header.split(" | ", 1)
         title  = parts[0].strip() if parts else ""
         url    = parts[1].strip() if len(parts) > 1 else ""
         snippet = " ".join(l.strip() for l in lines[1:])
 
-        if not title:
+        if not title or not url:
             continue
-
-        # extract email
-        email_m = re.search(r'[\w.+-]+@[\w-]+\.[\w.]+', block)
-        email   = email_m.group(0) if email_m else ""
-
-        # extract phone
-        phone_m = re.search(r'(\+?\d[\d\s\-().]{6,18}\d)', block)
-        phone   = phone_m.group(0).strip() if phone_m else ""
-
-        # skip irrelevant results (marketplaces, news, etc.)
-        skip_kw = ["alibaba.com/trade", "amazon.", "ebay.", "wikipedia", "youtube", "news", "blog"]
         if any(k in url.lower() for k in skip_kw):
             continue
 
+        # better company name: from domain, not page title
+        company = domain_to_company(url)
+
+        # extract email from snippet
+        email_m = re.search(r'[\w.+-]+@[\w-]+\.[\w.]{2,}', block)
+        email   = email_m.group(0) if email_m else ""
+
+        # extract phone
+        phone_m = re.search(r'(\+?\d[\d\s\-().]{7,18}\d)', block)
+        phone   = phone_m.group(0).strip() if phone_m else ""
+
+        # priority: has email → MEDIUM, else LOW
+        priority = "MEDIUM" if email or phone else "LOW"
+
         suppliers.append({
-            "company":        title,
+            "company":        company,
             "url":            url,
             "email":          clean_contact(email),
             "phone":          clean_contact(phone),
@@ -288,7 +307,7 @@ def parse_sd_results_to_json(sd_text: str, country: str, product: str) -> list:
             "products":       product,
             "certs":          "",
             "moq":            "",
-            "priority":       "MEDIUM",
+            "priority":       priority,
         })
     return suppliers
 
@@ -407,9 +426,9 @@ def run_search(country: str, product: str, extra: str, status_box=None, mode: st
     add_log(f"Starting search: **{product}** / **{country}**")
 
     sd_key  = st.secrets.get("SCRAPINGDOG_API_KEY", "")
-    add_log(f"mode={mode} · sd_key={'✅' if sd_key else '❌ MISSING'} · use_sd={bool(sd_key) and mode in ('🐕 ScrapingDog', '🔄 Auto (SD → Claude fallback)')} · use_ant={mode in ('🤖 Claude web_search', '🔄 Auto (SD → Claude fallback)')}")
-    use_sd  = bool(sd_key) and mode in ("🐕 ScrapingDog", "🔄 Auto (SD → Claude fallback)")
-    use_ant = mode in ("🤖 Claude web_search", "🔄 Auto (SD → Claude fallback)")
+    add_log(f"mode={mode} · sd_key={'✅' if sd_key else '❌ MISSING'} · use_sd={use_sd} · use_ant={use_ant}")
+    use_sd  = bool(sd_key) and mode == "🐕 ScrapingDog"
+    use_ant = mode == "🤖 Claude web_search"
 
     research_text = ""
 
@@ -564,9 +583,7 @@ if has_sd:
 if has_ant:
     mode_options.append("🤖 Claude web_search")
     mode_labels["🤖 Claude web_search"] = "Claude ищет и форматирует (дороже но глубже)"
-if has_sd and has_ant:
-    mode_options.append("🔄 Auto (SD → Claude fallback)")
-    mode_labels["🔄 Auto (SD → Claude fallback)"] = "ScrapingDog основной, Claude резерв"
+
 
 if not mode_options:
     st.error("Нет API ключей. Добавь ANTHROPIC_API_KEY или SCRAPINGDOG_API_KEY в Secrets.")
