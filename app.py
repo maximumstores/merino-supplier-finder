@@ -426,9 +426,9 @@ def run_search(country: str, product: str, extra: str, status_box=None, mode: st
     add_log(f"Starting search: **{product}** / **{country}**")
 
     sd_key  = st.secrets.get("SCRAPINGDOG_API_KEY", "")
-    add_log(f"mode={mode} · sd_key={'✅' if sd_key else '❌ MISSING'} · use_sd={use_sd} · use_ant={use_ant}")
     use_sd  = bool(sd_key) and mode == "🐕 ScrapingDog"
     use_ant = mode == "🤖 Claude web_search"
+    add_log(f"mode={mode} · sd_key={'✅' if sd_key else '❌ MISSING'} · use_sd={use_sd} · use_ant={use_ant}")
 
     research_text = ""
 
