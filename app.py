@@ -348,7 +348,7 @@ def enrich_with_scrapingdog(company: str, url: str, address: str) -> dict:
         return {k: clean_contact(v) for k, v in found.items()}
     return {}
 
-def run_search(country: str, product: str, extra: str, status_box=None):
+def run_search(country: str, product: str, extra: str, status_box=None, mode: str = "auto"):
     where = "globally" if country == "All countries" else f"in {country}"
     user_msg = (
         f"Find merino wool {product} manufacturers {where}. "
@@ -508,6 +508,32 @@ with st.expander("📖 How it works", expanded=False):
 st.divider()
 
 # ── SEARCH CONTROLS ───────────────────────────────────────────────────────────
+has_sd  = bool(st.secrets.get("SCRAPINGDOG_API_KEY",""))
+has_ant = bool(st.secrets.get("ANTHROPIC_API_KEY",""))
+
+mode_options = []
+mode_labels  = {}
+if has_sd:
+    mode_options.append("🐕 ScrapingDog")
+    mode_labels["🐕 ScrapingDog"] = "ScrapingDog → Claude formats JSON (дешевле)"
+if has_ant:
+    mode_options.append("🤖 Claude web_search")
+    mode_labels["🤖 Claude web_search"] = "Claude ищет и форматирует (дороже но глубже)"
+if has_sd and has_ant:
+    mode_options.append("🔄 Auto (SD → Claude fallback)")
+    mode_labels["🔄 Auto (SD → Claude fallback)"] = "ScrapingDog основной, Claude резерв"
+
+if not mode_options:
+    st.error("Нет API ключей. Добавь ANTHROPIC_API_KEY или SCRAPINGDOG_API_KEY в Secrets.")
+    st.stop()
+
+mc1, mc2 = st.columns([2, 4])
+with mc1:
+    search_mode = st.radio("Search engine", mode_options, horizontal=True,
+                           key="search_mode", label_visibility="collapsed")
+with mc2:
+    st.caption(f"⚙️ {mode_labels.get(search_mode,'')}")
+
 col1, col2, col3, col4, col5 = st.columns([1.4, 1.6, 2.5, 0.9, 0.7])
 
 with col1:
@@ -1000,4 +1026,4 @@ with tab3:
                                    plot_bgcolor="white")
                 st.plotly_chart(fig4, use_container_width=True)
     except Exception as e:
-        st.error(f"Chart error: {e}") 
+        st.error(f"Chart error: {e}")
