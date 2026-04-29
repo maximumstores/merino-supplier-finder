@@ -234,6 +234,21 @@ def add_log(msg: str, level: str = "info"):
     st.session_state.log.append(f"`{ts}` {icon} {msg}")
 
 # ── SEARCH FUNCTION ───────────────────────────────────────────────────────────
+def was_searched_recently(country: str, product: str, days: int = 7) -> bool:
+    """Return True if this country+product combo was searched within N days."""
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT COUNT(*) FROM merino_suppliers
+                    WHERE LOWER(search_country) = LOWER(%s)
+                      AND LOWER(search_product) = LOWER(%s)
+                      AND created_at > NOW() - INTERVAL '%s days'
+                """, (country, product, days))
+                return cur.fetchone()[0] > 0
+    except Exception:
+        return False
+
 def scrape_contact_page(url: str) -> str:
     """Fetch a page via ScrapingDog (JS rendered). Returns HTML text or empty string."""
     import urllib.request, urllib.parse
@@ -302,6 +317,12 @@ def run_search(country: str, product: str, extra: str, status_box=None):
         f"Return minimum 8–12 suppliers with as many direct contacts as possible."
     )
 
+    # ── CACHE CHECK ──
+    cache_days = 7
+    if was_searched_recently(country, product, cache_days):
+        add_log(f"⏭️ Skipped (searched in last {cache_days}d): **{product}** / **{country}**", "warn")
+        return 0
+
     client = get_anthropic_client()
     add_log(f"Starting search: **{product}** / **{country}**")
 
@@ -311,7 +332,7 @@ def run_search(country: str, product: str, extra: str, status_box=None):
 
     with client.messages.stream(
         model=MODEL,
-        max_tokens=4096,
+        max_tokens=2048,
         system=SYSTEM_PROMPT,
         tools=[{"type": "web_search_20250305", "name": "web_search"}],
         messages=[{"role": "user", "content": user_msg}],
@@ -519,6 +540,17 @@ if search_btn:
     products  = product if product else ["base layer / thermal underwear"]
     total_new = 0
     combos = [(c, p) for c in countries for p in products]
+
+    # show cache preview
+    cached = [(c,p) for c,p in combos if was_searched_recently(c, p, 7)]
+    fresh  = [(c,p) for c,p in combos if not was_searched_recently(c, p, 7)]
+    if cached:
+        st.info(f"⏭️ **{len(cached)}** уже искали (< 7 дней) — пропускаем: "
+                + ", ".join(f"{p}/{c}" for c,p in cached[:3])
+                + ("..." if len(cached)>3 else ""))
+    if not fresh:
+        st.warning("Все комбинации уже искали недавно. Поиск не запущен.")
+        st.stop()
     for i, (c, p) in enumerate(combos):
         label = f"[{i+1}/{len(combos)}] {p} / {c}"
         with st.status(label, expanded=True) as status:
