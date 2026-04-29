@@ -2,3 +2,4 @@ streamlit
 anthropic
 pandas
 psycopg2-binary
+plotly
