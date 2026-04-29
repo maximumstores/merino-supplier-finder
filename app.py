@@ -276,17 +276,24 @@ def scrape_contact_page(url: str) -> str:
 
 def scrapingdog_search(query: str, num: int = 10) -> str:
     """Search Google via ScrapingDog API. Returns text summary of results."""
-    import urllib.request, urllib.parse
+    import requests as req_lib
     try:
         api_key = st.secrets.get("SCRAPINGDOG_API_KEY", "")
         if not api_key:
             return ""
-        params = urllib.parse.urlencode({"api_key": api_key, "query": query, "results": num})
-        url = f"https://api.scrapingdog.com/google?{params}"
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=20) as r:
-            data = json.loads(r.read().decode())
-        # extract organic results
+        params = {
+            "api_key": api_key,
+            "query": query,
+            "results": num,
+            "country": "us",
+            "advance_search": "true",
+            "domain": "google.com",
+        }
+        r = req_lib.get("https://api.scrapingdog.com/google", params=params, timeout=20)
+        if r.status_code != 200:
+            add_log(f"ScrapingDog HTTP {r.status_code}", "warn")
+            return ""
+        data = r.json()
         results = data.get("organic_results", data.get("organic_data", []))
         lines = []
         for item in results:
@@ -296,6 +303,7 @@ def scrapingdog_search(query: str, num: int = 10) -> str:
             lines.append(f"- {title} | {link}\n  {snippet}")
         return "\n".join(lines)
     except Exception as e:
+        add_log(f"ScrapingDog search error: {e}", "warn")
         return ""
 
 def enrich_with_scrapingdog(company: str, url: str, address: str) -> dict:
