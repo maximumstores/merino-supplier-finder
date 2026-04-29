@@ -466,7 +466,7 @@ def render_table(df: pd.DataFrame, allow_edit: bool = False):
     export_cols = [c for c in base_cols if c in df_f.columns]
     df_export = df_f[export_cols]
 
-    ec1, ec2, ec3, ec_gap = st.columns([1, 1, 2, 3])
+    ec1, ec2, ec_gap = st.columns([1, 1, 4])
     with ec1:
         csv_bytes = df_export.to_csv(index=False).encode()
         st.download_button("⬇️ CSV", csv_bytes, "suppliers.csv", "text/csv", use_container_width=True)
@@ -477,13 +477,6 @@ def render_table(df: pd.DataFrame, allow_edit: bool = False):
         st.download_button("⬇️ Excel", xlsx_buf.read(), "suppliers.xlsx",
                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                            use_container_width=True)
-    with ec3:
-        tsv = df_export.to_csv(index=False, sep="\t")
-        if st.button("📋 TSV → Google Sheets", key=f"copy_{allow_edit}", use_container_width=True):
-            st.session_state[f"_tsv_{allow_edit}"] = tsv
-        if st.session_state.get(f"_tsv_{allow_edit}"):
-            st.text_area("Выдели всё (Ctrl+A) → Ctrl+C → вставляй в Sheets",
-                         st.session_state[f"_tsv_{allow_edit}"], height=55, key=f"tsv_{allow_edit}")
 
     st.caption(f"Showing **{len(df_f)}** of {len(df)} suppliers")
 
