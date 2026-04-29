@@ -407,6 +407,7 @@ def run_search(country: str, product: str, extra: str, status_box=None, mode: st
     add_log(f"Starting search: **{product}** / **{country}**")
 
     sd_key  = st.secrets.get("SCRAPINGDOG_API_KEY", "")
+    add_log(f"mode={mode} · sd_key={'✅' if sd_key else '❌ MISSING'} · use_sd={bool(sd_key) and mode in ('🐕 ScrapingDog', '🔄 Auto (SD → Claude fallback)')} · use_ant={mode in ('🤖 Claude web_search', '🔄 Auto (SD → Claude fallback)')}")
     use_sd  = bool(sd_key) and mode in ("🐕 ScrapingDog", "🔄 Auto (SD → Claude fallback)")
     use_ant = mode in ("🤖 Claude web_search", "🔄 Auto (SD → Claude fallback)")
 
@@ -1070,4 +1071,4 @@ with tab3:
                                    plot_bgcolor="white")
                 st.plotly_chart(fig4, use_container_width=True)
     except Exception as e:
-        st.error(f"Chart error: {e}") 
+        st.error(f"Chart error: {e}")
