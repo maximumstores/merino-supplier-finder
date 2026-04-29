@@ -469,14 +469,14 @@ def render_table(df: pd.DataFrame, allow_edit: bool = False):
     ec1, ec2, ec_gap = st.columns([1, 1, 4])
     with ec1:
         csv_bytes = df_export.to_csv(index=False).encode()
-        st.download_button("⬇️ CSV", csv_bytes, "suppliers.csv", "text/csv", use_container_width=True)
+        st.download_button("⬇️ CSV", csv_bytes, "suppliers.csv", "text/csv", use_container_width=True, key=f"csv_{allow_edit}")
     with ec2:
         xlsx_buf = io.BytesIO()
         df_export.to_excel(xlsx_buf, index=False, engine="openpyxl")
         xlsx_buf.seek(0)
         st.download_button("⬇️ Excel", xlsx_buf.read(), "suppliers.xlsx",
                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                           use_container_width=True)
+                           use_container_width=True, key=f"xlsx_{allow_edit}")
 
     st.caption(f"Showing **{len(df_f)}** of {len(df)} suppliers")
 
