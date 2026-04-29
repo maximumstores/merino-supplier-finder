@@ -528,6 +528,12 @@ def render_table(df: pd.DataFrame, allow_edit: bool = False):
                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                            use_container_width=True, key=f"xlsx_{allow_edit}")
 
+    # sort by score descending
+    if "⭐" in df_f.columns:
+        df_f = df_f.copy()
+        df_f["_sort"] = df_f["⭐"].str.extract(r"(\d+)").astype(float).fillna(0)
+        df_f = df_f.sort_values("_sort", ascending=False).drop(columns=["_sort"])
+
     st.caption(f"Showing **{len(df_f)}** of {len(df)} suppliers")
 
     show_cols = ["⭐","in_db","✉️","region","company","url","email","phone","whatsapp","products","certs","priority"]
