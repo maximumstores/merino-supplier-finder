@@ -142,9 +142,13 @@ def save_to_db(rows: list, country: str, product: str) -> int:
         conn.commit()
     return inserted
 
-@st.cache_data(ttl=60)
 def load_from_db() -> pd.DataFrame:
-    """Load all suppliers from DB."""
+    """Load all suppliers from DB. Uses session counter to force refresh."""
+    _rev = st.session_state.get("db_rev", 0)
+    return _load_from_db_cached(_rev)
+
+@st.cache_data(ttl=300)
+def _load_from_db_cached(_rev: int) -> pd.DataFrame:
     with get_db() as conn:
         return pd.read_sql(
             "SELECT * FROM merino_suppliers ORDER BY created_at DESC",
@@ -438,7 +442,7 @@ def run_search(country: str, product: str, extra: str, status_box=None):
     try:
         inserted = save_to_db(fresh, country, product)
         add_log(f"Saved **{inserted}** rows → PostgreSQL")
-        load_from_db.clear()
+        st.session_state["db_rev"] = st.session_state.get("db_rev", 0) + 1
     except Exception as e:
         add_log(f"DB write warning: {e}", "warn")
 
@@ -537,7 +541,7 @@ with m6:
     db_refresh = st.button("🔄 Refresh", use_container_width=True)
 
 if db_refresh:
-    load_from_db.clear()
+    st.session_state["db_rev"] = st.session_state.get("db_rev", 0) + 1
     st.rerun()
 
 # ── RUN SEARCH ────────────────────────────────────────────────────────────────
@@ -688,7 +692,7 @@ def render_table(df: pd.DataFrame, allow_edit: bool = False):
                                 cur.execute("UPDATE merino_suppliers SET status=%s WHERE id=%s",
                                             (row["status"], orig_id))
                         conn.commit()
-                    load_from_db.clear()
+                    st.session_state["db_rev"] = st.session_state.get("db_rev", 0) + 1
                     st.toast("Status saved ✅")
                 except Exception as e:
                     st.warning(f"Save error: {e}")
@@ -797,7 +801,7 @@ with tab2:
                         failed += 1
 
                 progress.progress(1.0, text="Done!")
-                load_from_db.clear()
+                st.session_state["db_rev"] = st.session_state.get("db_rev", 0) + 1
                 st.success(f"✅ Enriched {enriched}/{total} · Not found: {failed}")
                 st.rerun()
 
@@ -857,7 +861,7 @@ with tab2:
                                             cur.execute(f"UPDATE merino_suppliers SET {col}=%s WHERE id=%s",
                                                         (val, row["id"]))
                                     conn.commit()
-                                load_from_db.clear()
+                                st.session_state["db_rev"] = st.session_state.get("db_rev", 0) + 1
                                 enrich_status.update(label=f"✅ Found: {updates}", state="complete")
                                 st.rerun()
                             else:
