@@ -398,14 +398,6 @@ def enrich_with_scrapingdog(company: str, url: str, address: str) -> dict:
 
 def run_search(country: str, product: str, extra: str, status_box=None, mode: str = "auto"):
     where = "globally" if country == "All countries" else f"in {country}"
-    user_msg = (
-        f"Find merino wool {product} manufacturers {where}. "
-        f"{('Extra requirements: ' + extra) if extra else ''} "
-        f"Need OEM/ODM factories with direct contacts (email, phone, WhatsApp). "
-        f"Search Alibaba, Made-in-China, GlobalSources, company websites. "
-        f"For each supplier: visit their website contact page and find direct email/phone. "
-        f"Return minimum 8–12 suppliers with as many direct contacts as possible.\n\nREMEMBER: Output ONLY the JSON array. Start your response with [ and end with ]. No text before or after."
-    )
 
     # ── CACHE CHECK ──
     cache_days = 7
@@ -413,41 +405,11 @@ def run_search(country: str, product: str, extra: str, status_box=None, mode: st
         add_log(f"⏭️ Skipped (searched in last {cache_days}d): **{product}** / **{country}**", "warn")
         return 0
 
-    client = get_anthropic_client()
     add_log(f"Starting search: **{product}** / **{country}**")
 
-    # stream with web_search tool
-    search_count = 0
-    full_text = ""
-
-    with client.messages.stream(
-        model=MODEL,
-        max_tokens=3000,
-        system=SYSTEM_PROMPT,
-        tools=[{"type": "web_search_20250305", "name": "web_search"}],
-        messages=[{"role": "user", "content": user_msg}],
-    ) as stream:
-        for event in stream:
-            if hasattr(event, "type"):
-                if event.type == "content_block_start":
-                    cb = getattr(event, "content_block", None)
-                    if cb and cb.type == "tool_use":
-                        search_count += 1
-                        if status_box:
-                            status_box.update(label=f"🔍 Web search #{search_count}...")
-                        add_log(f"🔍 Web search #{search_count}")
-                    elif cb and cb.type == "text":
-                        if status_box:
-                            status_box.update(label="✍️ Generating results...")
-        msg = stream.get_final_message()
-
-    if search_count:
-        add_log(f"Web searches performed: **{search_count}**")
-
-    # collect text
-    for block in msg.content:
-        if block.type == "text":
-            full_text += block.text
+    # lazy init Claude — only when needed
+    def get_client():
+        return get_anthropic_client()
 
     # parse JSON — multiple fallback strategies
     add_log(f"Response length: {len(full_text)} chars")
