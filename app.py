@@ -676,6 +676,75 @@ with tab2:
 
             st.divider()
 
+            # ── ENRICH ALL ──
+            no_contacts = df_db[
+                df_db["email"].fillna("").str.len() +
+                df_db["phone"].fillna("").str.len() == 0
+            ]
+            has_sd = bool(st.secrets.get("SCRAPINGDOG_API_KEY",""))
+            enrich_col1, enrich_col2 = st.columns([2,4])
+            with enrich_col1:
+                enrich_all_btn = st.button(
+                    f"🐕 Enrich All without contacts ({len(no_contacts)})",
+                    key="enrich_all_btn",
+                    use_container_width=True,
+                    disabled=not has_sd or len(no_contacts) == 0
+                )
+                if not has_sd:
+                    st.caption("⚠️ Add SCRAPINGDOG_API_KEY to Secrets")
+            with enrich_col2:
+                if len(no_contacts) > 0:
+                    st.caption(f"Will process: {', '.join(no_contacts['company'].dropna().tolist()[:5])}{'...' if len(no_contacts)>5 else ''}")
+
+            if enrich_all_btn:
+                progress = st.progress(0, text="Starting...")
+                results_placeholder = st.empty()
+                enriched, failed, total = 0, 0, len(no_contacts)
+
+                for i, (_, r) in enumerate(no_contacts.iterrows()):
+                    company = r.get("company","?")
+                    progress.progress((i+1)/total, text=f"[{i+1}/{total}] 🐕 {company}...")
+                    try:
+                        found = enrich_with_scrapingdog(company, r.get("url",""), r.get("address",""))
+                        # fallback to web_search if ScrapingDog found nothing
+                        if not any(found.values()):
+                            client = get_anthropic_client()
+                            ep = (
+                                f"Find direct contact info for: {company}\n"
+                                f"Website: {r.get('url','')}\nAddress: {r.get('address','')}\n"
+                                f"Return ONLY JSON: {{\"email\":\"\",\"phone\":\"\",\"whatsapp\":\"\",\"contact_person\":\"\"}}"
+                            )
+                            resp = client.messages.create(
+                                model=MODEL, max_tokens=300,
+                                tools=[{"type":"web_search_20250305","name":"web_search"}],
+                                messages=[{"role":"user","content":ep}]
+                            )
+                            txt = " ".join(b.text for b in resp.content if b.type=="text")
+                            m = re.search(r"\{[^{}]*\}", txt)
+                            if m:
+                                found = {k: clean_contact(v) for k,v in json.loads(m.group(0)).items()}
+
+                        updates = {k: v for k, v in found.items() if v}
+                        if updates and "id" in r:
+                            with get_db() as conn:
+                                with conn.cursor() as cur:
+                                    for col, val in updates.items():
+                                        cur.execute(f"UPDATE merino_suppliers SET {col}=%s WHERE id=%s",
+                                                    (val, r["id"]))
+                                conn.commit()
+                            enriched += 1
+                        else:
+                            failed += 1
+                    except Exception:
+                        failed += 1
+
+                progress.progress(1.0, text="Done!")
+                load_from_db.clear()
+                st.success(f"✅ Enriched {enriched}/{total} · Not found: {failed}")
+                st.rerun()
+
+            st.divider()
+
             # ── ENRICH + EMAIL GENERATOR ──
             company_names = df_db["company"].dropna().tolist()
             sel_col1, sel_col2 = st.columns([3, 1])
