@@ -2,8 +2,6 @@ import streamlit as st
 import anthropic
 import json
 import re
-import gspread
-from google.oauth2.service_account import Credentials
 from datetime import datetime
 import pandas as pd
 import psycopg2
@@ -62,15 +60,6 @@ Return ONLY a valid JSON array. No markdown. No explanation. No code fences."""
 def get_anthropic_client():
     return anthropic.Anthropic(api_key=st.secrets["ANTHROPIC_API_KEY"])
 
-def get_gspread_client():
-    scopes = [
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive",
-    ]
-    creds = Credentials.from_service_account_info(
-        st.secrets["gcp_service_account"], scopes=scopes
-    )
-    return gspread.authorize(creds)
 
 # ── POSTGRESQL ───────────────────────────────────────────────────────────────
 def get_db():
@@ -249,52 +238,6 @@ def run_search(country: str, product: str, extra: str):
     return len(fresh)
 
 
-# ── WRITE TO SHEETS ───────────────────────────────────────────────────────────
-def write_to_sheets():
-    if not st.session_state.results:
-        add_log("No data to write", "warn")
-        return
-
-    tab_name = datetime.now().strftime("Search %d.%m %H:%M")
-    add_log(f'Creating sheet tab "{tab_name}"...', "blue")
-
-    gc = get_gspread_client()
-    spreadsheet = gc.open_by_key(SPREADSHEET_ID)
-
-    # create new worksheet
-    ws = spreadsheet.add_worksheet(title=tab_name, rows=500, cols=len(COLS))
-
-    # write header + data
-    rows = [HEADERS]
-    for r in st.session_state.results:
-        rows.append([str(r.get(c, "") or "") for c in COLS])
-
-    ws.update("A1", rows)
-
-    # format header row: bold + green background
-    ws.format("A1:L1", {
-        "backgroundColor": {"red": 0.94, "green": 0.99, "blue": 0.95},
-        "textFormat": {"bold": True},
-    })
-
-    # freeze header
-    spreadsheet.batch_update({
-        "requests": [{
-            "updateSheetProperties": {
-                "properties": {
-                    "sheetId": ws.id,
-                    "gridProperties": {"frozenRowCount": 1}
-                },
-                "fields": "gridProperties.frozenRowCount"
-            }
-        }]
-    })
-
-    add_log(
-        f'**{len(st.session_state.results)}** rows written → '
-        f'[Open sheet](https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID})',
-        "blue"
-    )
 
 
 # ── UI ────────────────────────────────────────────────────────────────────────
@@ -323,6 +266,10 @@ if clear_btn:
     st.session_state.log = []
     st.rerun()
 
+if db_refresh:
+    load_from_db.clear()
+    st.rerun()
+
 # ── METRICS ──────────────────────────────────────────────────────────────────
 m1, m2, m3, m4 = st.columns(4)
 with m1:
@@ -334,7 +281,7 @@ with m3:
     high = sum(1 for r in st.session_state.results if r.get("priority") == "HIGH")
     st.metric("HIGH priority", high)
 with m4:
-    sheets_btn = st.button("📊 Save to Google Sheets → new tab", use_container_width=True)
+    db_refresh = st.button("🔄 Refresh DB", use_container_width=True)
 
 # ── RUN SEARCH ────────────────────────────────────────────────────────────────
 if search_btn:
@@ -347,15 +294,6 @@ if search_btn:
             st.error(f"Error: {e}")
             add_log(str(e), "error")
 
-# ── WRITE TO SHEETS ───────────────────────────────────────────────────────────
-if sheets_btn:
-    with st.spinner("Writing to Google Sheets..."):
-        try:
-            write_to_sheets()
-            st.success("Done! Data written to new sheet tab.")
-        except Exception as e:
-            st.error(f"Sheets error: {e}")
-            add_log(str(e), "error")
 
 # ── LOG ───────────────────────────────────────────────────────────────────────
 if st.session_state.log:
