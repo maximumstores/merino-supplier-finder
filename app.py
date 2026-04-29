@@ -274,6 +274,30 @@ def scrape_contact_page(url: str) -> str:
     except Exception:
         return ""
 
+def scrapingdog_search(query: str, num: int = 10) -> str:
+    """Search Google via ScrapingDog API. Returns text summary of results."""
+    import urllib.request, urllib.parse
+    try:
+        api_key = st.secrets.get("SCRAPINGDOG_API_KEY", "")
+        if not api_key:
+            return ""
+        params = urllib.parse.urlencode({"api_key": api_key, "query": query, "results": num})
+        url = f"https://api.scrapingdog.com/google?{params}"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=20) as r:
+            data = json.loads(r.read().decode())
+        # extract organic results
+        results = data.get("organic_results", data.get("organic_data", []))
+        lines = []
+        for item in results:
+            title   = item.get("title", "")
+            link    = item.get("link", item.get("url", ""))
+            snippet = item.get("snippet", item.get("description", ""))
+            lines.append(f"- {title} | {link}\n  {snippet}")
+        return "\n".join(lines)
+    except Exception as e:
+        return ""
+
 def enrich_with_scrapingdog(company: str, url: str, address: str) -> dict:
     """Use ScrapingDog + Claude to extract contacts from company website."""
     import urllib.parse
