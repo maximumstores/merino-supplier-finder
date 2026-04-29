@@ -717,6 +717,8 @@ def render_table(df: pd.DataFrame, allow_edit: bool = False):
     # mark rows with real contacts
     df["✉️"] = df.apply(lambda r: "✅" if (r.get("email","") or r.get("phone","") or r.get("whatsapp","")) else "—", axis=1)
     df["⭐"] = df.apply(lambda r: score_emoji(calc_score(r)), axis=1)
+    if "status" not in df.columns:
+        df["status"] = "New"
 
     # ── FILTERS ──
     fc1, fc2, fc3, fc4 = st.columns([1.5, 1.5, 1.5, 2])
