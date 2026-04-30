@@ -150,10 +150,11 @@ def load_from_db() -> pd.DataFrame:
 @st.cache_data(ttl=300)
 def _load_from_db_cached(_rev: int) -> pd.DataFrame:
     with get_db() as conn:
-        return pd.read_sql(
-            "SELECT * FROM merino_suppliers WHERE status != '🗄️ Archived' OR status IS NULL ORDER BY created_at DESC",
-            conn
-        )
+        df = pd.read_sql("SELECT * FROM merino_suppliers ORDER BY created_at DESC", conn)
+    # filter out archived in Python (handles missing status column gracefully)
+    if "status" in df.columns:
+        df = df[df["status"].fillna("New") != "🗄️ Archived"]
+    return df
 
 def load_archived() -> pd.DataFrame:
     """Load archived suppliers."""
@@ -163,10 +164,10 @@ def load_archived() -> pd.DataFrame:
 @st.cache_data(ttl=300)
 def _load_archived_cached(_rev: int) -> pd.DataFrame:
     with get_db() as conn:
-        return pd.read_sql(
-            "SELECT * FROM merino_suppliers WHERE status='🗄️ Archived' ORDER BY created_at DESC",
-            conn
-        )
+        df = pd.read_sql("SELECT * FROM merino_suppliers ORDER BY created_at DESC", conn)
+    if "status" in df.columns:
+        return df[df["status"].fillna("New") == "🗄️ Archived"]
+    return pd.DataFrame()
 
 def region_flag(addr: str) -> str:
     a = (addr or "").lower()
@@ -1149,4 +1150,4 @@ with tab3:
                                    plot_bgcolor="white")
                 st.plotly_chart(fig4, use_container_width=True)
     except Exception as e:
-        st.error(f"Chart error: {e}") 
+        st.error(f"Chart error: {e}")
