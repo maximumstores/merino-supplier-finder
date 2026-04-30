@@ -577,20 +577,23 @@ st.caption(f"merino.tech internal · {MODEL} · web_search")
 
 with st.expander("📖 How it works", expanded=False):
     st.markdown("""
-**Workflow в 5 шагов:**
+**Workflow в 6 шагов:**
 
 | Шаг | Действие | Где |
 |-----|----------|-----|
-| 1️⃣ | Выбери страну + продукт → **▶ Search** | Search controls |
-| 2️⃣ | Проверь результаты, отфильтруй по ✅ контактам и ⭐ Score | Session results |
-| 3️⃣ | Нажми **🐕 Enrich All** — ScrapingDog сам найдёт контакты для всех без email/phone | Database (all) |
-| 4️⃣ | Выбери поставщика → **✉️ Generate email** → отправь | Database (all) |
-| 5️⃣ | Обновляй **Status** по каждому: Contacted → Replied → Negotiating → Deal | Database (all) |
+| 1️⃣ | Выбери режим поиска: **🐕 ScrapingDog** (без кредитов) или **🤖 Claude** (глубже). Доступны 20+ стран | Вверху |
+| 2️⃣ | Выбери страну + продукт → **▶ Search** | Search controls |
+| 3️⃣ | Нажми **🐕 Enrich All** — ScrapingDog ищет email/phone для всех без контактов | Database (all) |
+| 4️⃣ | Выбери поставщика → **✉️ Generate email** (EN или CN) → отправь | Database (all) |
+| 5️⃣ | Обновляй **Status** по каждому: Contacted → Replied → Negotiating → Deal → **🔄 Apply** | Database (all) |
+| 6️⃣ | Ненужных → статус **🗄️ Archived** → уходят в Archive таб с заметками | Archive |
 
-**⭐ Score** = чем выше тем лучше: email/phone/WhatsApp + сертификаты (Woolmark, OEKO-TEX, RWS) + priority HIGH  
-**🐕 Enrich All** = одна кнопка — ScrapingDog заходит на сайт каждой компании без контактов, Claude читает страницу и извлекает email/phone. Всё автоматически дописывается в базу  
-**✉️ Email** = AI пишет персональное outreach письмо под профиль конкретного поставщика (EN или CN)  
-**Status** = твой трекинг воронки: кому написал, кто ответил, с кем переговоры, кто закрыт
+**⭐ Score** = авто-балл: email +3, phone +2, Woolmark +2, OEKO-TEX/RWS +1, HIGH priority +3  
+**🐕 ScrapingDog** = поиск без Claude API (когда кончились кредиты). Менее точный но работает  
+**🤖 Claude web_search** = глубокий поиск с пониманием контекста. Рекомендуется когда есть кредиты  
+**🐕 Enrich All** = одна кнопка — ScrapingDog заходит на каждый сайт и извлекает прямые контакты  
+**✉️ Email generator** = AI пишет персональное письмо под профиль поставщика (EN или CN)  
+**🗄️ Archive** = компании которые не подошли — убираются из основного списка, но не удаляются. Можно вернуть
     """)
 
 st.divider()
