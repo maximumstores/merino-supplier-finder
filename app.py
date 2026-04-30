@@ -842,7 +842,7 @@ def render_table(df: pd.DataFrame, allow_edit: bool = False):
                             for idx, row in changed.iterrows():
                                 orig_id = df_f.loc[idx,"id"]
                                 cur.execute("UPDATE merino_suppliers SET status=%s WHERE id=%s",
-                                            (row["status"], orig_id))
+                                            (str(row["status"]), int(orig_id)))
                         conn.commit()
                     st.session_state["db_rev"] = st.session_state.get("db_rev", 0) + 1
                     st.toast("Status saved ✅")
@@ -944,7 +944,7 @@ with tab2:
                                 with conn.cursor() as cur:
                                     for col, val in updates.items():
                                         cur.execute(f"UPDATE merino_suppliers SET {col}=%s WHERE id=%s",
-                                                    (val, r["id"]))
+                                                    (val, int(r["id"])))
                                 conn.commit()
                             enriched += 1
                         else:
@@ -1011,7 +1011,7 @@ with tab2:
                                     with conn.cursor() as cur:
                                         for col, val in updates.items():
                                             cur.execute(f"UPDATE merino_suppliers SET {col}=%s WHERE id=%s",
-                                                        (val, row["id"]))
+                                                        (val, int(row["id"])))
                                     conn.commit()
                                 st.session_state["db_rev"] = st.session_state.get("db_rev", 0) + 1
                                 enrich_status.update(label=f"✅ Found: {updates}", state="complete")
