@@ -841,10 +841,11 @@ def render_table(df: pd.DataFrame, allow_edit: bool = False):
 
     if allow_edit:
         edited = st.data_editor(df_f[existing], use_container_width=True, height=520,
-                                hide_index=True, column_config=cfg)
+                                hide_index=True, column_config=cfg,
+                                key=f"editor_{allow_edit}")
         # save status changes back to DB
         if "status" in edited.columns and "id" in df_f.columns:
-            changed = edited[edited["status"] != df_f.loc[edited.index,"status"]]
+            changed = edited[edited["status"].fillna("New") != df_f.loc[edited.index,"status"].fillna("New")]
             if not changed.empty:
                 try:
                     with get_db() as conn:
@@ -855,11 +856,15 @@ def render_table(df: pd.DataFrame, allow_edit: bool = False):
                                             (str(row["status"]), int(orig_id)))
                         conn.commit()
                     st.session_state["db_rev"] = st.session_state.get("db_rev", 0) + 1
-                    st.toast("Status saved ✅")
-                    st.session_state["db_rev"] = st.session_state.get("db_rev", 0) + 1
-                    st.rerun()
                 except Exception as e:
                     st.warning(f"Save error: {e}")
+
+        # apply button to force refresh (needed after Archive)
+        save_col, _ = st.columns([1, 5])
+        with save_col:
+            if st.button("🔄 Apply & Refresh", key=f"apply_{allow_edit}", use_container_width=True):
+                st.session_state["db_rev"] = st.session_state.get("db_rev", 0) + 1
+                st.rerun()
     else:
         st.dataframe(df_f[existing], use_container_width=True, height=520,
                      hide_index=True, column_config=cfg)
