@@ -44,7 +44,7 @@ PRODUCTS = [
     "merino fabric / yarn",
     "any merino clothing",
 ]
-COLS = ["company", "url", "email", "phone", "whatsapp",
+COLS = ["company", "url", "email", "phone", "whatsapp", "wechat",
         "address", "contact_person", "description",
         "products", "certs", "moq", "priority"]
 HEADERS = ["Company", "URL", "Email", "Phone", "WhatsApp",
@@ -131,8 +131,8 @@ def save_to_db(rows: list, country: str, product: str) -> int:
     values = [
         (
             r.get("company",""), r.get("url",""), r.get("email",""),
-            r.get("phone",""), r.get("whatsapp",""), r.get("address",""),
-            r.get("contact_person",""), r.get("description",""),
+            r.get("phone",""), r.get("whatsapp",""), r.get("wechat",""),
+            r.get("address",""), r.get("contact_person",""), r.get("description",""),
             r.get("products",""), r.get("certs",""), r.get("moq",""),
             r.get("priority",""), country, product,
         )
@@ -142,7 +142,7 @@ def save_to_db(rows: list, country: str, product: str) -> int:
         with conn.cursor() as cur:
             execute_values(cur, """
                 INSERT INTO merino_suppliers
-                  (company,url,email,phone,whatsapp,address,contact_person,
+                  (company,url,email,phone,whatsapp,wechat,address,contact_person,
                    description,products,certs,moq,priority,search_country,search_product)
                 VALUES %s
                 ON CONFLICT (company, url) DO NOTHING
@@ -867,9 +867,9 @@ def render_table(df: pd.DataFrame, allow_edit: bool = False):
 
     st.caption(f"Showing **{len(df_f)}** of {len(df)} suppliers")
 
-    show_cols = ["⭐","in_db","✉️","region","company","status","url","email","phone","whatsapp","products","certs","priority"]
+    show_cols = ["⭐","in_db","✉️","region","company","status","url","email","phone","whatsapp","wechat","products","certs","priority","notes","quotes"]
     if "status" in df_f.columns:
-        show_cols = ["⭐","✉️","region","company","status","url","email","phone","whatsapp","products","certs","priority"]
+        show_cols = ["⭐","✉️","region","company","status","url","email","phone","whatsapp","wechat","products","certs","priority","notes","quotes"]
     existing = [c for c in show_cols if c in df_f.columns]
 
     cfg = {
@@ -877,6 +877,9 @@ def render_table(df: pd.DataFrame, allow_edit: bool = False):
         "⭐": st.column_config.TextColumn("Score", width="small"),
         "in_db": st.column_config.TextColumn("DB", width="small"),
         "✉️": st.column_config.TextColumn("📬", width="small"),
+        "wechat": st.column_config.TextColumn("💬 WeChat", width="small"),
+        "notes": st.column_config.TextColumn("📝 Notes", width="medium"),
+        "quotes": st.column_config.TextColumn("💰 Quotes (product: price/lead)", width="large"),
         "region": st.column_config.TextColumn("Region", width="small"),
         "company": st.column_config.TextColumn("Company", width="medium"),
         "email": st.column_config.TextColumn("Email", width="medium"),
