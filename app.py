@@ -856,6 +856,8 @@ def render_table(df: pd.DataFrame, allow_edit: bool = False):
                         conn.commit()
                     st.session_state["db_rev"] = st.session_state.get("db_rev", 0) + 1
                     st.toast("Status saved ✅")
+                    st.session_state["db_rev"] = st.session_state.get("db_rev", 0) + 1
+                    st.rerun()
                 except Exception as e:
                     st.warning(f"Save error: {e}")
     else:
