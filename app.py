@@ -20,10 +20,12 @@ MODEL = "claude-sonnet-4-20250514"
 SPREADSHEET_ID = "1kooRXMsREQ6vpyZMz6sLBzB-6ztWpIPUKOieYhAt-ws"
 
 COUNTRIES = [
-    "China", "Vietnam", "Turkey", "India",
-    "Romania", "Bulgaria", "Italy", "Portugal",
-    "Poland", "Czech Republic", "Serbia", "Bangladesh",
-    "Australia", "New Zealand", "All countries",
+    "China", "Vietnam", "Bangladesh", "India", "Thailand",
+    "Indonesia", "Cambodia", "Myanmar", "Sri Lanka", "Pakistan", "Nepal",
+    "Australia", "New Zealand",
+    "Turkey", "Romania", "Bulgaria", "Italy", "Portugal",
+    "Poland", "Czech Republic", "Serbia", "Lithuania", "Hungary",
+    "All countries",
 ]
 PRODUCTS = [
     "base layer / thermal underwear",
