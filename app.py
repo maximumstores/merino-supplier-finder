@@ -1121,9 +1121,66 @@ with tab2:
                             st.error(str(e))
 
                 if st.session_state.get("_email_out"):
-                    st.text_area("Generated email", st.session_state["_email_out"], height=280, key="email_out_area")
-                    if st.button("📋 Copy", key="copy_email"):
-                        st.toast("Select text → Ctrl+C")
+                    # parse subject + body
+                    email_raw = st.session_state["_email_out"]
+                    subj_match = re.search(r"Subject[:\s]+(.+)", email_raw, re.IGNORECASE)
+                    default_subj = subj_match.group(1).strip() if subj_match else f"Partnership inquiry — merino.tech"
+                    body_clean = re.sub(r"Subject[:\s]+.+\n?", "", email_raw, flags=re.IGNORECASE).strip()
+
+                    e1, e2 = st.columns(2)
+                    with e1:
+                        send_from = st.text_input("From", value=st.secrets.get("SMTP_FROM",""), key="send_from")
+                    with e2:
+                        supplier_email = row.get("email","")
+                        send_to = st.text_input("To", value=supplier_email, key="send_to")
+
+                    send_subj = st.text_input("Subject", value=default_subj, key="send_subj")
+                    send_body = st.text_area("Email body", value=body_clean, height=240, key="send_body")
+
+                    sc1, sc2 = st.columns([1,3])
+                    with sc1:
+                        if st.button("📤 Send email", key="send_btn", type="primary",
+                                     use_container_width=True, disabled=not send_to):
+                            try:
+                                import smtplib
+                                from email.mime.text import MIMEText
+                                from email.mime.multipart import MIMEMultipart
+
+                                smtp_host = st.secrets.get("SMTP_HOST", "smtp.gmail.com")
+                                smtp_port = int(st.secrets.get("SMTP_PORT", 587))
+                                smtp_user = st.secrets.get("SMTP_USER", send_from)
+                                smtp_pass = st.secrets.get("SMTP_PASS", "")
+
+                                msg = MIMEMultipart()
+                                msg["From"]    = send_from
+                                msg["To"]      = send_to
+                                msg["Subject"] = send_subj
+                                msg.attach(MIMEText(send_body, "plain", "utf-8"))
+
+                                with smtplib.SMTP(smtp_host, smtp_port) as server:
+                                    server.starttls()
+                                    server.login(smtp_user, smtp_pass)
+                                    server.sendmail(send_from, send_to.split(","), msg.as_string())
+
+                                # update status to Contacted
+                                if "id" in row:
+                                    with get_db() as conn:
+                                        with conn.cursor() as cur:
+                                            cur.execute(
+                                                "UPDATE merino_suppliers SET status='Contacted' WHERE id=%s",
+                                                (int(row["id"]),)
+                                            )
+                                        conn.commit()
+                                    st.session_state["db_rev"] = st.session_state.get("db_rev",0)+1
+
+                                st.success(f"✅ Email sent to {send_to}! Status → Contacted")
+                                st.session_state.pop("_email_out", None)
+                                st.rerun()
+
+                            except Exception as e:
+                                st.error(f"Send error: {e}")
+                    with sc2:
+                        st.caption("💡 Add SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, SMTP_FROM to Streamlit Secrets")
 
     except Exception as e:
         st.error(f"DB read error: {e}")
