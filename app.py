@@ -1068,7 +1068,15 @@ with tab2:
             company_names = df_db["company"].dropna().tolist()
             sel_col1, sel_col2 = st.columns([3, 1])
             with sel_col1:
-                selected_company = st.selectbox("Select company for Enrich / Email", company_names, key="sel_company")
+                search_q = st.text_input("🔍 Type company name", key="sel_search",
+                                          placeholder="Start typing to filter...")
+                filtered_names = [n for n in company_names if search_q.lower() in n.lower()] if search_q else company_names
+                selected_company = st.selectbox(
+                    f"Select ({len(filtered_names)} found)",
+                    filtered_names,
+                    key="sel_company",
+                    label_visibility="collapsed" if not search_q else "visible"
+                ) if filtered_names else None
             
             row = df_db[df_db["company"] == selected_company].iloc[0].to_dict() if selected_company else {}
 
@@ -1285,7 +1293,9 @@ with tab6:
             # ── SELECT + GENERATE + SEND ──
             if not df_out_f.empty:
                 sel_names = df_out_f["company"].dropna().tolist()
-                out_company = st.selectbox("Выбери компанию для письма", sel_names, key="out_company")
+                out_search = st.text_input("🔍 Поиск компании", key="out_search", placeholder="Начни вводить...")
+                out_filtered = [n for n in sel_names if out_search.lower() in n.lower()] if out_search else sel_names
+                out_company = st.selectbox(f"Выбери ({len(out_filtered)})", out_filtered, key="out_company") if out_filtered else None
                 out_row = df_out_f[df_out_f["company"] == out_company].iloc[0].to_dict() if out_company else {}
 
                 og1, og2 = st.columns([1, 1])
