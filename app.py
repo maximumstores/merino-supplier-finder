@@ -179,27 +179,39 @@ def _load_archived_cached(_rev: int) -> pd.DataFrame:
     return pd.DataFrame()
 
 def region_flag(addr: str) -> str:
-    a = (addr or "").lower()
-    if re.search(r"china|shanghai|beijing|guangdong|jiangsu|zhejiang|ningbo|shenzhen|suzhou|guangzhou", a):
-        return "🇨🇳 China"
-    if re.search(r"india|mumbai|delhi|noida|panipat|bangalore|chennai", a):
-        return "🇮🇳 India"
-    if re.search(r"vietnam|ho chi minh|hanoi", a):
-        return "🇻🇳 Vietnam"
-    if re.search(r"turkey|istanbul|bursa|ankara", a):
-        return "🇹🇷 Turkey"
-    if re.search(r"romania|bucharest|cluj|brasov", a):
-        return "🇷🇴 Romania"
-    if re.search(r"bulgaria|sofia|plovdiv", a):
-        return "🇧🇬 Bulgaria"
-    if re.search(r"italy|italia|milan|como", a):
-        return "🇮🇹 Italy"
-    if re.search(r"portugal|lisbon|porto", a):
-        return "🇵🇹 Portugal"
-    if re.search(r"poland|warszawa|krakow|lodz", a):
-        return "🇵🇱 Poland"
-    if re.search(r"australia|sydney|melbourne", a):
-        return "🇦🇺 Australia"
+    a = (addr or "").lower().strip()
+    REGIONS = [
+        ("🇨🇳 China",       r"china|shanghai|beijing|guangdong|jiangsu|zhejiang|ningbo|shenzhen|suzhou|guangzhou|hangzhou|changshu|zhangjiagang|jiaxing|cn$"),
+        ("🇮🇳 India",       r"india|mumbai|delhi|noida|panipat|bangalore|chennai|surat|jaipur|kolkata"),
+        ("🇻🇳 Vietnam",     r"vietnam|viet nam|ho chi minh|hanoi|hcmc|vn$"),
+        ("🇹🇷 Turkey",      r"turkey|türkiye|istanbul|bursa|ankara|izmir|tr$"),
+        ("🇧🇩 Bangladesh",  r"bangladesh|dhaka|chittagong|bd$"),
+        ("🇵🇰 Pakistan",    r"pakistan|karachi|lahore|faisalabad|pk$"),
+        ("🇷🇴 Romania",     r"romania|bucharest|cluj|brasov|ro$"),
+        ("🇧🇬 Bulgaria",    r"bulgaria|sofia|plovdiv|bg$"),
+        ("🇮🇹 Italy",       r"italy|italia|milan|como|florence|it$"),
+        ("🇵🇹 Portugal",    r"portugal|lisbon|porto|pt$"),
+        ("🇵🇱 Poland",      r"poland|warszawa|krakow|lodz|pl$"),
+        ("🇨🇿 Czech Rep",   r"czech|czechia|prague|brno|cz$"),
+        ("🇷🇸 Serbia",      r"serbia|belgrade|novi sad|rs$"),
+        ("🇦🇺 Australia",   r"australia|sydney|melbourne|au$"),
+        ("🇳🇿 New Zealand", r"new zealand|auckland|wellington|nz$"),
+        ("🇲🇳 Mongolia",    r"mongolia|ulaanbaatar|mn$"),
+        ("🇲🇦 Morocco",     r"morocco|casablanca|rabat|ma$"),
+        ("🇿🇦 South Africa",r"south africa|johannesburg|cape town|za$"),
+        ("🇪🇹 Ethiopia",    r"ethiopia|addis ababa|et$"),
+        ("🇵🇪 Peru",        r"peru|lima|pe$"),
+        ("🇦🇷 Argentina",   r"argentina|buenos aires|ar$"),
+        ("🇺🇾 Uruguay",     r"uruguay|montevideo|uy$"),
+        ("🇹🇭 Thailand",    r"thailand|bangkok|th$"),
+        ("🇮🇩 Indonesia",   r"indonesia|jakarta|bandung|id$"),
+        ("🇰🇭 Cambodia",    r"cambodia|phnom penh|kh$"),
+        ("🇲🇲 Myanmar",     r"myanmar|burma|yangon|mm$"),
+        ("🇱🇰 Sri Lanka",   r"sri lanka|colombo|lk$"),
+    ]
+    for label, pattern in REGIONS:
+        if re.search(pattern, a):
+            return label
     return "🌐 Other"
 
 def clean_contact(val: str) -> str:
@@ -646,8 +658,11 @@ with mc2:
 col1, col2, col3, col4, col5 = st.columns([1.4, 1.6, 2.5, 0.9, 0.7])
 
 with col1:
-    country = st.multiselect("Country", COUNTRIES[:-1], default=["China"], key="country",
-                              placeholder="Select countries...")
+    country_select = st.multiselect("Country", COUNTRIES, default=["China"], key="country",
+                                    placeholder="Select or type any country...")
+    country_custom = st.text_input("", placeholder="Or type any country not in list (e.g. Fiji, Samoa...)", 
+                                   key="country_custom", label_visibility="collapsed")
+    country = country_select + ([country_custom.strip()] if country_custom.strip() else [])
 with col2:
     product = st.multiselect("Product", PRODUCTS, default=["base layer / thermal underwear"], key="product",
                               placeholder="Select products...")
