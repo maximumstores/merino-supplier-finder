@@ -785,21 +785,21 @@ def render_table(df: pd.DataFrame, allow_edit: bool = False):
     if f_region != "All":
         mask &= df["region"] == f_region
     if f_pri != "All":
-        mask &= df.get("priority", pd.Series([""] * len(df), index=df.index)).fillna("") == f_pri
+        mask &= df["priority"].fillna("") == f_pri
     if f_contact == "✅ Has contacts":
         mask &= df["✉️"] == "✅"
     elif f_contact == "— No contacts":
         mask &= df["✉️"] == "—"
     if f_company:
-        mask &= df.get("company","").fillna("").str.lower().str.contains(f_company.lower())
+        mask &= df["company"].fillna("").str.lower().str.contains(f_company.lower(), na=False)
     if f_email == "✅ Has email":
-        mask &= df.get("email","").fillna("").str.len() > 0
+        mask &= df["email"].fillna("").str.len() > 0
     elif f_email == "— No email":
-        mask &= df.get("email","").fillna("").str.len() == 0
+        mask &= df["email"].fillna("").str.len() == 0
     if f_phone == "✅ Has phone":
-        mask &= df.get("phone","").fillna("").str.len() > 0
+        mask &= df["phone"].fillna("").str.len() > 0
     elif f_phone == "— No phone":
-        mask &= df.get("phone","").fillna("").str.len() == 0
+        mask &= df["phone"].fillna("").str.len() == 0
     df_f = df[mask]
 
     # ── EXPORT COLS (defined before use) ──
