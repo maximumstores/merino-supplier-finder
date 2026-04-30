@@ -1290,8 +1290,40 @@ with tab6:
             # ── CONTACT LIST ──
             show_out = [c for c in ["company","status","email","phone","whatsapp","wechat","address"] if c in df_out_f.columns]
             st.caption(f"Найдено: **{len(df_out_f)}** поставщиков")
-            st.dataframe(df_out_f[show_out], use_container_width=True, height=220, hide_index=True,
-                         column_config={"status": st.column_config.TextColumn("Status", width="small")})
+            out_edited = st.data_editor(
+                df_out_f[show_out].reset_index(drop=True),
+                use_container_width=True, height=240, hide_index=True,
+                key=f"out_table_{out_status_f}",
+                column_config={
+                    "status": st.column_config.SelectboxColumn(
+                        "Status", width="medium",
+                        options=["New","Contacted","Replied","Negotiating","Deal","Rejected","🗄️ Archived"]
+                    ),
+                    "wechat": st.column_config.TextColumn("💬 WeChat", width="small"),
+                }
+            )
+            # save status changes
+            if "status" in out_edited.columns and "id" in df_out_f.columns:
+                df_out_reset = df_out_f.reset_index(drop=True)
+                changed = out_edited[out_edited["status"].fillna("New") != df_out_reset["status"].fillna("New")]
+                if not changed.empty:
+                    try:
+                        with get_db() as conn:
+                            with conn.cursor() as cur:
+                                for idx, row_ch in changed.iterrows():
+                                    rid = df_out_reset.loc[idx, "id"]
+                                    cur.execute("UPDATE merino_suppliers SET status=%s WHERE id=%s",
+                                                (str(row_ch["status"]), int(rid)))
+                            conn.commit()
+                        st.session_state["db_rev"] = st.session_state.get("db_rev",0)+1
+                        st.toast("✅ Status updated")
+                    except Exception as e:
+                        st.warning(f"Save error: {e}")
+            oab1, _ = st.columns([1,5])
+            with oab1:
+                if st.button("🔄 Refresh", key="out_refresh", use_container_width=True):
+                    st.session_state["db_rev"] = st.session_state.get("db_rev",0)+1
+                    st.rerun()
 
             st.divider()
 
