@@ -581,19 +581,30 @@ with st.expander("📖 How it works", expanded=False):
 
 | Шаг | Действие | Где |
 |-----|----------|-----|
-| 1️⃣ | Выбери режим поиска: **🐕 ScrapingDog** (без кредитов) или **🤖 Claude** (глубже). Доступны 20+ стран | Вверху |
-| 2️⃣ | Выбери страну + продукт → **▶ Search** | Search controls |
-| 3️⃣ | Нажми **🐕 Enrich All** — ScrapingDog ищет email/phone для всех без контактов | Database (all) |
-| 4️⃣ | Выбери поставщика → **✉️ Generate email** (EN или CN) → отправь | Database (all) |
-| 5️⃣ | Обновляй **Status** по каждому: Contacted → Replied → Negotiating → Deal → **🔄 Apply** | Database (all) |
-| 6️⃣ | Ненужных → статус **🗄️ Archived** → уходят в Archive таб с заметками | Archive |
+| 1️⃣ | Выбери режим поиска: **🐕 ScrapingDog** или **🤖 Claude** → страну + продукт → **▶ Search** | Вверху страницы |
+| 2️⃣ | Проверь результаты: ⭐ Score, ✅ контакты, фильтры по региону/приоритету | Session results |
+| 3️⃣ | Прокрути вниз в Database (all) → нажми **🐕 Enrich All without contacts (N)** — автопоиск email/phone | Database (all) ↓ |
+| 4️⃣ | Прокрути вниз → выбери компанию → нажми **✉️ Generate email** → выбери язык EN/CN → скопируй | Database (all) ↓ |
+| 5️⃣ | В таблице кликни ячейку **Status** → выбери статус → нажми **🔄 Apply & Refresh** | Database (all) |
+| 6️⃣ | Если поставщик не нужен → Status = **🗄️ Archived** → Apply → переходит в таб Archive | Archive |
 
-**⭐ Score** = авто-балл: email +3, phone +2, Woolmark +2, OEKO-TEX/RWS +1, HIGH priority +3  
-**🐕 ScrapingDog** = поиск без Claude API (когда кончились кредиты). Менее точный но работает  
-**🤖 Claude web_search** = глубокий поиск с пониманием контекста. Рекомендуется когда есть кредиты  
-**🐕 Enrich All** = одна кнопка — ScrapingDog заходит на каждый сайт и извлекает прямые контакты  
-**✉️ Email generator** = AI пишет персональное письмо под профиль поставщика (EN или CN)  
-**🗄️ Archive** = компании которые не подошли — убираются из основного списка, но не удаляются. Можно вернуть
+---
+
+**Все фичи:**
+
+| Функция | Описание |
+|---------|----------|
+| ⭐ Score | Авто-балл качества: email +3, phone +2, Woolmark +2, сертификаты +1 каждый, HIGH +3 |
+| 🐕 ScrapingDog | Поиск через Google без Claude API — работает даже когда кончились кредиты |
+| 🤖 Claude web_search | Глубокий поиск с пониманием контекста — точнее, рекомендуется основным |
+| 🐕 Enrich All | Одна кнопка — ScrapingDog обходит сайты всех компаний без контактов и ищет email/phone |
+| ✉️ Email generator | AI пишет персональное outreach письмо на EN или CN под профиль конкретного поставщика |
+| Status | Воронка: New → Contacted → Replied → Negotiating → Deal / Rejected / 🗄️ Archived |
+| 🗄️ Archive | Компании которые не подошли — скрыты из основного списка, но хранятся с заметками. Можно восстановить |
+| 📝 Notes | Поле для заметок в Archive: причина отказа, дата контакта, что ответили |
+| ⬇️ CSV / Excel | Экспорт текущей таблицы с фильтрами в файл |
+| 🗑️ Delete | Полное удаление из базы (необратимо) |
+| 📊 Charts | Графики: по региону, приоритету, контактам, продуктам |
     """)
 
 st.divider()
