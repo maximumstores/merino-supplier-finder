@@ -1268,18 +1268,23 @@ with tab6:
             st.info("База пустая — сначала запусти поиск.")
         else:
             # ── SEARCH ──
-            oc1, oc2, oc3 = st.columns(3)
+            oc1, oc2, oc3, oc4 = st.columns(4)
             with oc1:
-                out_search = st.text_input("🔍 Поиск по компании", placeholder="Введи название...", key="out_search")
+                out_search = st.text_input("🔍 Компания", placeholder="Введи название...", key="out_search")
             with oc2:
-                out_email_f = st.text_input("✉️ Поиск по email", placeholder="sales@, @gmail...", key="out_email_f")
+                out_email_f = st.text_input("✉️ Email", placeholder="sales@, @gmail...", key="out_email_f")
             with oc3:
-                out_phone_f = st.text_input("📞 Поиск по телефону", placeholder="+86, +84...", key="out_phone_f")
+                out_phone_f = st.text_input("📞 Телефон", placeholder="+86, +84...", key="out_phone_f")
+            with oc4:
+                STATUS_OPTIONS = ["All","New","Contacted","Replied","Negotiating","Deal","Rejected"]
+                out_status_f = st.selectbox("📋 Status", STATUS_OPTIONS, key="out_status_f")
 
             omask = pd.Series([True]*len(df_out), index=df_out.index)
-            if out_search: omask &= df_out["company"].fillna("").str.lower().str.contains(out_search.lower(), na=False)
-            if out_email_f: omask &= df_out["email"].fillna("").str.lower().str.contains(out_email_f.lower(), na=False)
-            if out_phone_f: omask &= df_out["phone"].fillna("").str.lower().str.contains(out_phone_f.lower(), na=False)
+            if out_search:   omask &= df_out["company"].fillna("").str.lower().str.contains(out_search.lower(), na=False)
+            if out_email_f:  omask &= df_out["email"].fillna("").str.lower().str.contains(out_email_f.lower(), na=False)
+            if out_phone_f:  omask &= df_out["phone"].fillna("").str.lower().str.contains(out_phone_f.lower(), na=False)
+            if out_status_f != "All":
+                omask &= df_out["status"].fillna("New") == out_status_f
             df_out_f = df_out[omask]
 
             # ── CONTACT LIST ──
