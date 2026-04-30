@@ -20,13 +20,19 @@ MODEL = "claude-sonnet-4-20250514"
 SPREADSHEET_ID = "1kooRXMsREQ6vpyZMz6sLBzB-6ztWpIPUKOieYhAt-ws"
 
 COUNTRIES = [
+    # Asia Pacific
     "China", "Vietnam", "Bangladesh", "India", "Thailand",
     "Indonesia", "Cambodia", "Myanmar", "Sri Lanka", "Pakistan", "Nepal",
-    "Australia", "New Zealand",
+    "Australia", "New Zealand", "Mongolia",
+    # Europe & Middle East
     "Turkey", "Romania", "Bulgaria", "Italy", "Portugal",
-    "Poland", "Czech Republic", "Serbia", "Lithuania", "Hungary",
-    "🌍 Global (best worldwide)",
-    "All countries",
+    "Poland", "Czech Republic", "Serbia", "Lithuania", "Hungary", "Morocco",
+    # Americas
+    "Peru", "Argentina", "Uruguay",
+    # Africa
+    "South Africa", "Ethiopia",
+    # Global
+    "🌍 Global (best worldwide)", "All countries",
 ]
 PRODUCTS = [
     "base layer / thermal underwear",
@@ -772,13 +778,15 @@ def render_table(df: pd.DataFrame, allow_edit: bool = False):
     with fc3:
         f_contact = st.selectbox("📬 Contacts", ["All","✅ Has contacts","— No contacts"], key=f"fc_{allow_edit}")
 
-    fc4, fc5, fc6 = st.columns(3)
+    fc4, fc5, fc6, fc7 = st.columns(4)
     with fc4:
-        f_company = st.text_input("🏭 Company name", key=f"fco_{allow_edit}", placeholder="Search company...")
+        f_company = st.text_input("🏭 Company", key=f"fco_{allow_edit}", placeholder="Search company...")
     with fc5:
-        f_email = st.text_input("✉️ Email", key=f"fe_{allow_edit}", placeholder="Search email or domain...")
+        f_email = st.text_input("✉️ Email", key=f"fe_{allow_edit}", placeholder="sales@, @gmail...")
     with fc6:
-        f_phone = st.text_input("📞 Phone", key=f"fph_{allow_edit}", placeholder="Search phone...")
+        f_phone = st.text_input("📞 Phone", key=f"fph_{allow_edit}", placeholder="+86, +84...")
+    with fc7:
+        f_url = st.text_input("🌐 Website", key=f"furl_{allow_edit}", placeholder=".com, woolona...")
 
     # apply filters
     mask = pd.Series([True] * len(df), index=df.index)
@@ -796,6 +804,8 @@ def render_table(df: pd.DataFrame, allow_edit: bool = False):
         mask &= df["email"].fillna("").str.lower().str.contains(f_email.lower(), na=False)
     if f_phone:
         mask &= df["phone"].fillna("").str.lower().str.contains(f_phone.lower(), na=False)
+    if f_url:
+        mask &= df["url"].fillna("").str.lower().str.contains(f_url.lower(), na=False)
     df_f = df[mask]
 
     # ── EXPORT COLS (defined before use) ──
