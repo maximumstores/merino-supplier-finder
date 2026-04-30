@@ -762,17 +762,23 @@ def render_table(df: pd.DataFrame, allow_edit: bool = False):
         df["status"] = "New"
 
     # ── FILTERS ──
-    fc1, fc2, fc3, fc4 = st.columns([1.5, 1.5, 1.5, 2])
+    fc1, fc2, fc3 = st.columns(3)
     with fc1:
         regions = ["All"] + sorted(df["region"].unique().tolist())
-        f_region = st.selectbox("Region", regions, key=f"fr_{allow_edit}")
+        f_region = st.selectbox("🌍 Region", regions, key=f"fr_{allow_edit}")
     with fc2:
         pris = ["All"] + [p for p in ["HIGH","MEDIUM","LOW"] if p in df.get("priority", pd.Series()).values]
-        f_pri = st.selectbox("Priority", pris, key=f"fp_{allow_edit}")
+        f_pri = st.selectbox("⭐ Priority", pris, key=f"fp_{allow_edit}")
     with fc3:
-        f_contact = st.selectbox("Contacts", ["All","✅ Has contacts","— No contacts"], key=f"fc_{allow_edit}")
+        f_contact = st.selectbox("📬 Contacts", ["All","✅ Has contacts","— No contacts"], key=f"fc_{allow_edit}")
+
+    fc4, fc5, fc6 = st.columns(3)
     with fc4:
-        f_search = st.text_input("🔍 Search company / product", key=f"fs_{allow_edit}")
+        f_company = st.text_input("🏭 Company name", key=f"fco_{allow_edit}", placeholder="Search...")
+    with fc5:
+        f_email = st.selectbox("✉️ Email", ["All","✅ Has email","— No email"], key=f"fe_{allow_edit}")
+    with fc6:
+        f_phone = st.selectbox("📞 Phone", ["All","✅ Has phone","— No phone"], key=f"fph_{allow_edit}")
 
     # apply filters
     mask = pd.Series([True] * len(df), index=df.index)
@@ -784,10 +790,16 @@ def render_table(df: pd.DataFrame, allow_edit: bool = False):
         mask &= df["✉️"] == "✅"
     elif f_contact == "— No contacts":
         mask &= df["✉️"] == "—"
-    if f_search:
-        q = f_search.lower()
-        mask &= (df.get("company","").fillna("").str.lower().str.contains(q) |
-                 df.get("products","").fillna("").str.lower().str.contains(q))
+    if f_company:
+        mask &= df.get("company","").fillna("").str.lower().str.contains(f_company.lower())
+    if f_email == "✅ Has email":
+        mask &= df.get("email","").fillna("").str.len() > 0
+    elif f_email == "— No email":
+        mask &= df.get("email","").fillna("").str.len() == 0
+    if f_phone == "✅ Has phone":
+        mask &= df.get("phone","").fillna("").str.len() > 0
+    elif f_phone == "— No phone":
+        mask &= df.get("phone","").fillna("").str.len() == 0
     df_f = df[mask]
 
     # ── EXPORT COLS (defined before use) ──
@@ -1194,6 +1206,64 @@ Return ONLY a valid JSON array starting with ["""
             except Exception as e:
                 imp_status.update(label=f"❌ {e}", state="error")
                 st.error(str(e))
+
+    # ── REVIEW & SELECTIVE IMPORT ──────────────────────────────────────────────
+    candidates = st.session_state.get("_import_candidates", [])
+    if candidates:
+        st.divider()
+        st.markdown(f"**Review {len(candidates)} extracted suppliers — select which to import:**")
+
+        df_cand = pd.DataFrame(candidates)
+        df_cand.insert(0, "✅ Import", True)
+
+        # filters
+        fc1, fc2, fc3 = st.columns([1.5, 1.5, 2])
+        with fc1:
+            fi_region = st.selectbox("Filter region", ["All"] + sorted(df_cand["address"].fillna("").unique().tolist()), key="fi_region")
+        with fc2:
+            fi_pri = st.selectbox("Filter priority", ["All","HIGH","MEDIUM","LOW"], key="fi_pri")
+        with fc3:
+            fi_search = st.text_input("Search company", key="fi_search", placeholder="type to filter...")
+
+        mask = pd.Series([True]*len(df_cand))
+        if fi_region != "All": mask &= df_cand["address"].fillna("") == fi_region
+        if fi_pri    != "All": mask &= df_cand["priority"].fillna("") == fi_pri
+        if fi_search: mask &= df_cand["company"].fillna("").str.lower().str.contains(fi_search.lower())
+        df_filtered = df_cand[mask].copy()
+
+        show_imp = [c for c in ["✅ Import","company","email","phone","url","address","products","priority"] if c in df_filtered.columns]
+        edited_imp = st.data_editor(
+            df_filtered[show_imp], use_container_width=True, height=400, hide_index=True,
+            key="import_editor",
+            column_config={
+                "✅ Import": st.column_config.CheckboxColumn("Import?", width="small"),
+                "url": st.column_config.LinkColumn(),
+                "priority": st.column_config.TextColumn("Pri", width="small"),
+            }
+        )
+
+        sel_count = edited_imp["✅ Import"].sum() if "✅ Import" in edited_imp.columns else 0
+        ib1, ib2, _ = st.columns([1.5, 1.5, 4])
+        with ib1:
+            confirm_btn = st.button(f"💾 Import selected ({sel_count})", type="primary", use_container_width=True, disabled=sel_count==0)
+        with ib2:
+            if st.button("✕ Discard all", use_container_width=True):
+                st.session_state.pop("_import_candidates", None)
+                st.rerun()
+
+        if confirm_btn:
+            to_import = edited_imp[edited_imp["✅ Import"] == True].drop(columns=["✅ Import"]).to_dict("records")
+            # merge back full data from candidates
+            full_rows = []
+            for row in to_import:
+                orig = next((c for c in candidates if c.get("company") == row.get("company")), row)
+                full_rows.append(clean_row(orig))
+            if full_rows:
+                inserted = save_to_db(full_rows, "Import", "manual")
+                st.session_state["db_rev"] = st.session_state.get("db_rev", 0) + 1
+                st.session_state.pop("_import_candidates", None)
+                st.success(f"✅ Imported **{len(full_rows)}** suppliers to Database!")
+                st.rerun()
 
 with tab3:
     try:
