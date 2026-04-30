@@ -2,10 +2,6 @@ import streamlit as st
 import anthropic
 import json
 import re
-import streamlit as st
-import anthropic
-import json
-import re
 from datetime import datetime
 import pandas as pd
 import psycopg2
