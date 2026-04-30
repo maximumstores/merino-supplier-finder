@@ -246,6 +246,16 @@ try:
 except Exception as e:
     st.warning(f"DB init warning: {e}")
 
+# explicit migration — runs every startup, safe
+try:
+    with get_db() as _conn:
+        with _conn.cursor() as _cur:
+            _cur.execute("ALTER TABLE merino_suppliers ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'New'")
+            _cur.execute("ALTER TABLE merino_suppliers ADD COLUMN IF NOT EXISTS notes TEXT DEFAULT ''")
+        _conn.commit()
+except Exception as _e:
+    pass  # table may not exist yet — init_db will create it
+
 # ── SESSION STATE ────────────────────────────────────────────────────────────
 if "results" not in st.session_state:
     st.session_state.results = []
