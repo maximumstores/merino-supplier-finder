@@ -1297,10 +1297,11 @@ with tab6:
 
             # ── SELECT + GENERATE + SEND ──
             if not df_out_f.empty:
+                # use filtered list for company selector
                 sel_names = df_out_f["company"].dropna().tolist()
                 out_search2 = st.text_input("🔍 Поиск компании", key="out_search2", placeholder="Начни вводить...")
                 out_filtered = [n for n in sel_names if out_search2.lower() in n.lower()] if out_search2 else sel_names
-                out_company = st.selectbox(f"Выбери ({len(out_filtered)})", out_filtered, key="out_company2") if out_filtered else None
+                out_company = st.selectbox(f"Выбери ({len(out_filtered)})", out_filtered, key=f"out_company2_{out_status_f}_{len(out_filtered)}") if out_filtered else None
                 out_row = df_out_f[df_out_f["company"] == out_company].iloc[0].to_dict() if out_company else {}
 
                 og1, og2 = st.columns([1, 1])
