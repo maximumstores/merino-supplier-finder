@@ -2,6 +2,10 @@ import streamlit as st
 import anthropic
 import json
 import re
+import streamlit as st
+import anthropic
+import json
+import re
 from datetime import datetime
 import pandas as pd
 import psycopg2
@@ -25,6 +29,7 @@ COUNTRIES = [
     "Australia", "New Zealand",
     "Turkey", "Romania", "Bulgaria", "Italy", "Portugal",
     "Poland", "Czech Republic", "Serbia", "Lithuania", "Hungary",
+    "🌍 Global (best worldwide)",
     "All countries",
 ]
 PRODUCTS = [
@@ -442,7 +447,7 @@ def enrich_with_scrapingdog(company: str, url: str, address: str) -> dict:
     return {}
 
 def run_search(country: str, product: str, extra: str, status_box=None, mode: str = "auto"):
-    where = "globally" if country == "All countries" else f"in {country}"
+    where = "globally, find the best worldwide" if country in ("All countries", "🌍 Global (best worldwide)") else f"in {country}"
 
     # cache check
     if was_searched_recently(country, product, 7):
@@ -744,7 +749,7 @@ if st.session_state.log:
             st.markdown(line)
 
 # ── RESULTS — tabs: session / database / charts ───────────────────────────────
-tab1, tab2, tab3, tab4 = st.tabs(["🔍 Session results", "🗄️ Database (all)", "📊 Charts", "🗄️ Archive"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["🔍 Session results", "🗄️ Database (all)", "📊 Charts", "🗄️ Archive", "📥 Import"])
 
 def render_table(df: pd.DataFrame, allow_edit: bool = False):
     """Render filtered supplier table."""
@@ -1120,6 +1125,79 @@ with tab4:
                          column_config={"url": st.column_config.LinkColumn()})
     except Exception as e:
         st.error(f"Archive error: {e}")
+
+with tab5:
+    st.markdown("**📥 Import from document / text**")
+    st.caption("Вставь текст с описанием поставщиков — AI извлечёт компании, email, телефоны и добавит в базу")
+
+    imp_text = st.text_area("Paste text here", height=200, placeholder="Вставь любой текст: отчёт, статью, список поставщиков...", key="import_text")
+
+    imp_col1, imp_col2 = st.columns([1, 4])
+    with imp_col1:
+        import_btn = st.button("🤖 Extract & Import", type="primary", use_container_width=True, disabled=not imp_text.strip())
+
+    if import_btn and imp_text.strip():
+        with st.status("Extracting suppliers from text...", expanded=True) as imp_status:
+            try:
+                imp_status.write("🤖 Claude reading document...")
+                client = get_anthropic_client()
+                extract_prompt = f"""Extract all supplier/manufacturer/company information from this text.
+
+Text:
+{imp_text[:12000]}
+
+For each company found, return a JSON object with:
+company, url, email, phone, whatsapp, address, contact_person, description, products, certs, moq, priority
+
+priority = HIGH (has direct email+phone) | MEDIUM (has email or phone) | LOW (no contacts)
+Missing fields = empty string "".
+
+Return ONLY a valid JSON array starting with ["""
+
+                resp = client.messages.create(
+                    model=MODEL, max_tokens=4000,
+                    messages=[
+                        {"role": "user", "content": extract_prompt},
+                        {"role": "assistant", "content": "["},
+                    ],
+                )
+                raw = " ".join(b.text for b in resp.content if b.type == "text")
+                full = "[" + raw
+                m = re.search(r"\[[\s\S]*\]", full)
+                if not m:
+                    imp_status.update(label="❌ Could not parse response", state="error")
+                else:
+                    parsed = json.loads(m.group(0))
+                    if not isinstance(parsed, list):
+                        parsed = [parsed]
+
+                    # dedup against DB
+                    try:
+                        df_ex = load_from_db()
+                        existing_db = set((df_ex["company"].fillna("") + df_ex["url"].fillna("")).str.lower())
+                    except Exception:
+                        existing_db = set()
+
+                    fresh = [clean_row(r) for r in parsed
+                             if (r.get("company","") + r.get("url","")).lower() not in existing_db]
+
+                    if fresh:
+                        inserted = save_to_db(fresh, "Import", "manual")
+                        st.session_state["db_rev"] = st.session_state.get("db_rev", 0) + 1
+                        imp_status.update(label=f"✅ Extracted {len(parsed)} · Added {len(fresh)} new to DB", state="complete")
+                        st.success(f"✅ Added **{len(fresh)}** suppliers to Database")
+
+                        # preview
+                        df_prev = pd.DataFrame(fresh)
+                        show = [c for c in ["company","email","phone","address","products","priority"] if c in df_prev.columns]
+                        st.dataframe(df_prev[show], use_container_width=True, hide_index=True)
+                    else:
+                        imp_status.update(label="⚠️ All companies already in DB", state="complete")
+                        st.info("All extracted companies already exist in the database.")
+
+            except Exception as e:
+                imp_status.update(label=f"❌ {e}", state="error")
+                st.error(str(e))
 
 with tab3:
     try:
