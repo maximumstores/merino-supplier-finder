@@ -774,11 +774,11 @@ def render_table(df: pd.DataFrame, allow_edit: bool = False):
 
     fc4, fc5, fc6 = st.columns(3)
     with fc4:
-        f_company = st.text_input("🏭 Company name", key=f"fco_{allow_edit}", placeholder="Search...")
+        f_company = st.text_input("🏭 Company name", key=f"fco_{allow_edit}", placeholder="Search company...")
     with fc5:
-        f_email = st.selectbox("✉️ Email", ["All","✅ Has email","— No email"], key=f"fe_{allow_edit}")
+        f_email = st.text_input("✉️ Email", key=f"fe_{allow_edit}", placeholder="Search email or domain...")
     with fc6:
-        f_phone = st.selectbox("📞 Phone", ["All","✅ Has phone","— No phone"], key=f"fph_{allow_edit}")
+        f_phone = st.text_input("📞 Phone", key=f"fph_{allow_edit}", placeholder="Search phone...")
 
     # apply filters
     mask = pd.Series([True] * len(df), index=df.index)
@@ -792,14 +792,10 @@ def render_table(df: pd.DataFrame, allow_edit: bool = False):
         mask &= df["✉️"] == "—"
     if f_company:
         mask &= df["company"].fillna("").str.lower().str.contains(f_company.lower(), na=False)
-    if f_email == "✅ Has email":
-        mask &= df["email"].fillna("").str.len() > 0
-    elif f_email == "— No email":
-        mask &= df["email"].fillna("").str.len() == 0
-    if f_phone == "✅ Has phone":
-        mask &= df["phone"].fillna("").str.len() > 0
-    elif f_phone == "— No phone":
-        mask &= df["phone"].fillna("").str.len() == 0
+    if f_email:
+        mask &= df["email"].fillna("").str.lower().str.contains(f_email.lower(), na=False)
+    if f_phone:
+        mask &= df["phone"].fillna("").str.lower().str.contains(f_phone.lower(), na=False)
     df_f = df[mask]
 
     # ── EXPORT COLS (defined before use) ──
