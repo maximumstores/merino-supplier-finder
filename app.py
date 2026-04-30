@@ -124,6 +124,35 @@ def init_db():
             """)
         conn.commit()
 
+def get_setting(key: str, default: str = "") -> str:
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT value FROM app_settings WHERE key=%s", (key,))
+                row = cur.fetchone()
+                return row[0] if row else default
+    except Exception:
+        return default
+
+def set_setting(key: str, value: str):
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO app_settings (key, value) VALUES (%s, %s)
+                ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+            """, (key, value))
+        conn.commit()
+
+def get_smtp_config() -> dict:
+    return {
+        "host":  get_setting("smtp_host",  "smtp.gmail.com"),
+        "port":  int(get_setting("smtp_port", "587")),
+        "user":  get_setting("smtp_user",  ""),
+        "passw": get_setting("smtp_pass",  ""),
+        "from":  get_setting("smtp_from",  ""),
+        "signature": get_setting("smtp_signature", "Best regards,\nmerino.tech sourcing team"),
+    }
+
 def save_to_db(rows: list, country: str, product: str) -> int:
     """Insert rows, skip duplicates. Returns count inserted."""
     if not rows:
@@ -271,11 +300,17 @@ except Exception as e:
 try:
     with get_db() as _conn:
         with _conn.cursor() as _cur:
-            _cur.execute("ALTER TABLE merino_suppliers ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'New'")
-            _cur.execute("ALTER TABLE merino_suppliers ADD COLUMN IF NOT EXISTS notes TEXT DEFAULT ''")
+            for _sql in [
+                "ALTER TABLE merino_suppliers ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'New'",
+                "ALTER TABLE merino_suppliers ADD COLUMN IF NOT EXISTS notes TEXT DEFAULT ''",
+                "ALTER TABLE merino_suppliers ADD COLUMN IF NOT EXISTS wechat TEXT DEFAULT ''",
+                "ALTER TABLE merino_suppliers ADD COLUMN IF NOT EXISTS quotes TEXT DEFAULT ''",
+                "CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT)",
+            ]:
+                _cur.execute(_sql)
         _conn.commit()
 except Exception as _e:
-    pass  # table may not exist yet — init_db will create it
+    pass  # table may not exist yet
 
 # ── SESSION STATE ────────────────────────────────────────────────────────────
 if "results" not in st.session_state:
@@ -766,7 +801,7 @@ if st.session_state.log:
             st.markdown(line)
 
 # ── RESULTS — tabs: session / database / charts ───────────────────────────────
-tab1, tab2, tab3, tab4, tab5 = st.tabs(["🔍 Session results", "🗄️ Database (all)", "📊 Charts", "🗄️ Archive", "📥 Import"])
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["🔍 Session results", "🗄️ Database (all)", "📊 Charts", "🗄️ Archive", "📥 Import", "✉️ Outreach"])
 
 def render_table(df: pd.DataFrame, allow_edit: bool = False):
     """Render filtered supplier table."""
@@ -1129,7 +1164,7 @@ with tab2:
 
                     e1, e2 = st.columns(2)
                     with e1:
-                        send_from = st.text_input("From", value=st.secrets.get("SMTP_FROM",""), key="send_from")
+                        send_from = st.text_input("From", value=get_setting("smtp_from",""), key="send_from")
                     with e2:
                         supplier_email = row.get("email","")
                         send_to = st.text_input("To", value=supplier_email, key="send_to")
@@ -1214,6 +1249,127 @@ with tab4:
                          column_config={"url": st.column_config.LinkColumn()})
     except Exception as e:
         st.error(f"Archive error: {e}")
+
+with tab6:
+    st.markdown("**✉️ Outreach — поиск контакта + генерация + отправка**")
+    st.divider()
+
+    try:
+        df_out = load_from_db()
+        if df_out.empty:
+            st.info("База пустая — сначала запусти поиск.")
+        else:
+            # ── SEARCH ──
+            oc1, oc2, oc3 = st.columns(3)
+            with oc1:
+                out_search = st.text_input("🔍 Поиск по компании", placeholder="Введи название...", key="out_search")
+            with oc2:
+                out_email_f = st.text_input("✉️ Поиск по email", placeholder="sales@, @gmail...", key="out_email_f")
+            with oc3:
+                out_phone_f = st.text_input("📞 Поиск по телефону", placeholder="+86, +84...", key="out_phone_f")
+
+            omask = pd.Series([True]*len(df_out), index=df_out.index)
+            if out_search: omask &= df_out["company"].fillna("").str.lower().str.contains(out_search.lower(), na=False)
+            if out_email_f: omask &= df_out["email"].fillna("").str.lower().str.contains(out_email_f.lower(), na=False)
+            if out_phone_f: omask &= df_out["phone"].fillna("").str.lower().str.contains(out_phone_f.lower(), na=False)
+            df_out_f = df_out[omask]
+
+            # ── CONTACT LIST ──
+            show_out = [c for c in ["company","status","email","phone","whatsapp","wechat","address"] if c in df_out_f.columns]
+            st.caption(f"Найдено: **{len(df_out_f)}** поставщиков")
+            st.dataframe(df_out_f[show_out], use_container_width=True, height=220, hide_index=True,
+                         column_config={"status": st.column_config.TextColumn("Status", width="small")})
+
+            st.divider()
+
+            # ── SELECT + GENERATE + SEND ──
+            if not df_out_f.empty:
+                sel_names = df_out_f["company"].dropna().tolist()
+                out_company = st.selectbox("Выбери компанию для письма", sel_names, key="out_company")
+                out_row = df_out_f[df_out_f["company"] == out_company].iloc[0].to_dict() if out_company else {}
+
+                og1, og2 = st.columns([1, 1])
+                with og1:
+                    out_lang = st.selectbox("Язык письма", ["English", "Chinese (中文)"], key="out_lang")
+                with og2:
+                    out_product_focus = st.text_input("Фокус на продукт (опц.)", placeholder="baby sleeping bag, 500 pcs", key="out_prod")
+
+                if st.button("🤖 Generate email", key="out_gen_btn", type="primary"):
+                    with st.spinner("Пишем письмо..."):
+                        try:
+                            client = get_anthropic_client()
+                            lang_note = "Write in Chinese (Mandarin)" if "Chinese" in out_lang else "Write in English"
+                            prompt = (
+                                f"Write a professional B2B outreach email to a merino wool supplier.\n"
+                                f"Our brand: merino.tech — premium merino wool clothing, Amazon FBA, US/EU markets.\n\n"
+                                f"Supplier: {out_company}\n"
+                                f"Products they make: {out_row.get('products','')}\n"
+                                f"Certifications: {out_row.get('certs','')}\n"
+                                f"Contact person: {out_row.get('contact_person','Sales Team')}\n"
+                                f"Address: {out_row.get('address','')}\n"
+                                + (f"Focus on: {out_product_focus}\n" if out_product_focus else "") +
+                                f"\n{lang_note}. 150-200 words. Ask about MOQ, pricing, samples, lead time.\n"
+                                f"Include Subject line at top. Professional but friendly."
+                            )
+                            resp = client.messages.create(model=MODEL, max_tokens=700,
+                                messages=[{"role":"user","content":prompt}])
+                            st.session_state["_out_email"] = resp.content[0].text
+                        except Exception as e:
+                            st.error(str(e))
+
+                if st.session_state.get("_out_email"):
+                    email_raw = st.session_state["_out_email"]
+                    import re as _re
+                    subj_m = _re.search(r"Subject[:\s]+(.+)", email_raw, _re.IGNORECASE)
+                    default_subj = subj_m.group(1).strip() if subj_m else "Partnership inquiry — merino.tech"
+                    body_clean = _re.sub(r"Subject[:\s]+.+\n?", "", email_raw, flags=_re.IGNORECASE).strip()
+
+                    sf1, sf2 = st.columns(2)
+                    with sf1:
+                        out_from = st.text_input("От кого (From)", value=st.secrets.get("SMTP_FROM",""), key="out_from")
+                    with sf2:
+                        out_to = st.text_input("Кому (To)", value=out_row.get("email",""), key="out_to")
+
+                    out_subj = st.text_input("Тема (Subject)", value=default_subj, key="out_subj")
+                    out_body = st.text_area("Текст письма", value=body_clean, height=260, key="out_body")
+
+                    sb1, sb2 = st.columns([1, 3])
+                    with sb1:
+                        if st.button("📤 Отправить", key="out_send", type="primary",
+                                     use_container_width=True, disabled=not out_to.strip()):
+                            try:
+                                import smtplib
+                                from email.mime.text import MIMEText
+                                from email.mime.multipart import MIMEMultipart
+                                msg = MIMEMultipart()
+                                msg["From"] = out_from
+                                msg["To"]   = out_to
+                                msg["Subject"] = out_subj
+                                msg.attach(MIMEText(out_body, "plain", "utf-8"))
+                                with smtplib.SMTP(
+                                    st.secrets.get("SMTP_HOST","smtp.gmail.com"),
+                                    int(st.secrets.get("SMTP_PORT",587))
+                                ) as srv:
+                                    srv.starttls()
+                                    srv.login(st.secrets.get("SMTP_USER",out_from), st.secrets.get("SMTP_PASS",""))
+                                    srv.sendmail(out_from, out_to.split(","), msg.as_string())
+                                # update status
+                                if "id" in out_row:
+                                    with get_db() as conn:
+                                        with conn.cursor() as cur:
+                                            cur.execute("UPDATE merino_suppliers SET status='Contacted' WHERE id=%s", (int(out_row["id"]),))
+                                        conn.commit()
+                                    st.session_state["db_rev"] = st.session_state.get("db_rev",0)+1
+                                st.success(f"✅ Отправлено на {out_to} · Статус → Contacted")
+                                st.session_state.pop("_out_email", None)
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Ошибка отправки: {e}")
+                    with sb2:
+                        st.caption("SMTP_HOST / SMTP_PORT / SMTP_USER / SMTP_PASS / SMTP_FROM → Streamlit Secrets")
+
+    except Exception as e:
+        st.error(f"Outreach error: {e}")
 
 with tab5:
     st.markdown("**📥 Import from document / text**")
@@ -1345,6 +1501,89 @@ Return ONLY a valid JSON array starting with ["""
                 st.session_state.pop("_import_candidates", None)
                 st.success(f"✅ Imported **{len(full_rows)}** suppliers to Database!")
                 st.rerun()
+
+with tab6:
+    st.markdown("**✉️ Outreach Settings**")
+    st.caption("SMTP настройки для отправки писем поставщикам")
+
+    smtp = get_smtp_config()
+
+    s1, s2 = st.columns(2)
+    with s1:
+        st.markdown("##### Email account")
+        smtp_from = st.text_input("From email", value=smtp["from"], key="cfg_from",
+                                   placeholder="sourcing@merino.tech")
+        smtp_user = st.text_input("SMTP username", value=smtp["user"], key="cfg_user",
+                                   placeholder="same as From email")
+        smtp_pass = st.text_input("SMTP password / App Password", value=smtp["passw"],
+                                   type="password", key="cfg_pass",
+                                   placeholder="Gmail App Password or SMTP password")
+    with s2:
+        st.markdown("##### Server")
+        smtp_host = st.text_input("SMTP host", value=smtp["host"], key="cfg_host",
+                                   placeholder="smtp.gmail.com")
+        smtp_port = st.text_input("SMTP port", value=str(smtp["port"]), key="cfg_port",
+                                   placeholder="587")
+        st.markdown("##### Quick presets")
+        pc1, pc2 = st.columns(2)
+        with pc1:
+            if st.button("📧 Gmail", use_container_width=True):
+                set_setting("smtp_host", "smtp.gmail.com")
+                set_setting("smtp_port", "587")
+                st.rerun()
+        with pc2:
+            if st.button("🏢 Custom domain", use_container_width=True):
+                set_setting("smtp_host", "mail.yourdomain.com")
+                set_setting("smtp_port", "587")
+                st.rerun()
+
+    st.markdown("##### Email signature")
+    smtp_sig = st.text_area("Signature", value=smtp["signature"], height=80, key="cfg_sig")
+
+    st.markdown("---")
+    st.markdown("##### Test send")
+    t1, t2 = st.columns([2, 1])
+    with t1:
+        test_to = st.text_input("Test recipient email", key="test_to", placeholder="your@email.com")
+    with t2:
+        st.write("")
+        test_btn = st.button("📤 Send test", use_container_width=True, disabled=not test_to)
+
+    if st.button("💾 Save settings", type="primary"):
+        set_setting("smtp_from",      smtp_from)
+        set_setting("smtp_user",      smtp_user)
+        set_setting("smtp_pass",      smtp_pass)
+        set_setting("smtp_host",      smtp_host)
+        set_setting("smtp_port",      smtp_port)
+        set_setting("smtp_signature", smtp_sig)
+        st.success("✅ Settings saved!")
+
+    if test_btn and test_to:
+        try:
+            import smtplib
+            from email.mime.text import MIMEText
+            _s = get_smtp_config()
+            msg = MIMEText(f"Test email from merino.tech Supplier Finder\n\n{_s['signature']}", "plain", "utf-8")
+            msg["From"]    = _s["from"]
+            msg["To"]      = test_to
+            msg["Subject"] = "Test — merino.tech Supplier Finder"
+            with smtplib.SMTP(_s["host"], _s["port"]) as srv:
+                srv.starttls()
+                srv.login(_s["user"], _s["passw"])
+                srv.sendmail(_s["from"], [test_to], msg.as_string())
+            st.success(f"✅ Test email sent to {test_to}!")
+        except Exception as e:
+            st.error(f"❌ {e}")
+
+    st.divider()
+    st.markdown("##### 📋 Gmail App Password — инструкция")
+    st.markdown("""
+1. Открой [myaccount.google.com](https://myaccount.google.com)
+2. **Security** → включи **2-Step Verification**
+3. **Security** → **App passwords** → выбери "Mail" + устройство
+4. Скопируй 16-значный пароль → вставь в **SMTP password** выше
+5. В **SMTP host** используй `smtp.gmail.com`, порт `587`
+    """)
 
 with tab3:
     try:
