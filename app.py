@@ -151,7 +151,20 @@ def load_from_db() -> pd.DataFrame:
 def _load_from_db_cached(_rev: int) -> pd.DataFrame:
     with get_db() as conn:
         return pd.read_sql(
-            "SELECT * FROM merino_suppliers ORDER BY created_at DESC",
+            "SELECT * FROM merino_suppliers WHERE status != '🗄️ Archived' OR status IS NULL ORDER BY created_at DESC",
+            conn
+        )
+
+def load_archived() -> pd.DataFrame:
+    """Load archived suppliers."""
+    _rev = st.session_state.get("db_rev", 0)
+    return _load_archived_cached(_rev)
+
+@st.cache_data(ttl=300)
+def _load_archived_cached(_rev: int) -> pd.DataFrame:
+    with get_db() as conn:
+        return pd.read_sql(
+            "SELECT * FROM merino_suppliers WHERE status='🗄️ Archived' ORDER BY created_at DESC",
             conn
         )
 
@@ -704,7 +717,7 @@ if st.session_state.log:
             st.markdown(line)
 
 # ── RESULTS — tabs: session / database / charts ───────────────────────────────
-tab1, tab2, tab3 = st.tabs(["🔍 Session results", "🗄️ Database (all)", "📊 Charts"])
+tab1, tab2, tab3, tab4 = st.tabs(["🔍 Session results", "🗄️ Database (all)", "📊 Charts", "🗄️ Archive"])
 
 def render_table(df: pd.DataFrame, allow_edit: bool = False):
     """Render filtered supplier table."""
@@ -811,7 +824,7 @@ def render_table(df: pd.DataFrame, allow_edit: bool = False):
     }
     if allow_edit and "status" in df_f.columns:
         cfg["status"] = st.column_config.SelectboxColumn(
-            "Status", options=["New","Contacted","Replied","Negotiating","Deal","Rejected"],
+            "Status", options=["New","Contacted","Replied","Negotiating","Deal","Rejected","🗄️ Archived"],
             width="small"
         )
 
@@ -1043,6 +1056,36 @@ with tab2:
 
     except Exception as e:
         st.error(f"DB read error: {e}")
+
+with tab4:
+    try:
+        df_arch = load_archived()
+        if df_arch.empty:
+            st.info("Archive is empty. Set status **🗄️ Archived** on any supplier to move it here.")
+        else:
+            st.caption(f"**{len(df_arch)}** archived suppliers")
+            # restore button
+            ra1, ra2 = st.columns([2, 4])
+            with ra1:
+                restore_co = st.selectbox("Restore company", ["—"] + df_arch["company"].dropna().tolist(), key="restore_sel")
+            if restore_co != "—":
+                with ra1:
+                    if st.button(f"↩️ Restore: {restore_co[:25]}", key="restore_btn"):
+                        rid = df_arch[df_arch["company"] == restore_co]["id"].iloc[0]
+                        with get_db() as conn:
+                            with conn.cursor() as cur:
+                                cur.execute("UPDATE merino_suppliers SET status='New' WHERE id=%s", (int(rid),))
+                            conn.commit()
+                        st.session_state["db_rev"] = st.session_state.get("db_rev",0) + 1
+                        st.toast(f"Restored: {restore_co}")
+                        st.rerun()
+            df_arch2 = df_arch.copy()
+            df_arch2["region"] = df_arch2["address"].fillna("").apply(region_flag)
+            show = [c for c in ["region","company","url","email","phone","products","certs","priority","created_at"] if c in df_arch2.columns]
+            st.dataframe(df_arch2[show], use_container_width=True, height=500, hide_index=True,
+                         column_config={"url": st.column_config.LinkColumn()})
+    except Exception as e:
+        st.error(f"Archive error: {e}")
 
 with tab3:
     try:
