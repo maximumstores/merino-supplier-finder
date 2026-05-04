@@ -16,7 +16,10 @@ st.set_page_config(
 )
 
 # ── CONSTANTS ────────────────────────────────────────────────────────────────
-MODEL = "claude-sonnet-4-20250514"
+MODEL = "claude-sonnet-4-20250514"          # для основного поиска (run_search)
+CHEAP_MODEL = "claude-haiku-4-5-20251001"   # для extraction задач (×5 дешевше)
+DAILY_TOKEN_LIMIT = 500_000                  # жорсткий ліміт на день (in+out)
+ENRICH_ALL_MAX_PER_CLICK = 50                # макс. рядків за один клік "Enrich All"
 SPREADSHEET_ID = "1kooRXMsREQ6vpyZMz6sLBzB-6ztWpIPUKOieYhAt-ws"
 
 COUNTRIES = [
@@ -89,6 +92,69 @@ Example of correct response: [{"company":"X","url":"...","email":"..."}]"""
 # ── HELPERS ──────────────────────────────────────────────────────────────────
 def get_anthropic_client():
     return anthropic.Anthropic(api_key=st.secrets["ANTHROPIC_API_KEY"])
+
+
+# ── TOKEN BUDGET (денний ліміт 500K) ─────────────────────────────────────────
+import os
+from pathlib import Path
+from datetime import date
+
+_USAGE_FILE = Path(os.getenv("CLAUDE_USAGE_FILE", "/tmp/merino_claude_usage.json"))
+
+class DailyBudgetExceeded(Exception):
+    pass
+
+def _load_usage() -> dict:
+    today = str(date.today())
+    if not _USAGE_FILE.exists():
+        return {"date": today, "tokens_in": 0, "tokens_out": 0, "calls": 0}
+    try:
+        u = json.loads(_USAGE_FILE.read_text())
+    except Exception:
+        return {"date": today, "tokens_in": 0, "tokens_out": 0, "calls": 0}
+    if u.get("date") != today:
+        return {"date": today, "tokens_in": 0, "tokens_out": 0, "calls": 0}
+    return u
+
+def _save_usage(u: dict) -> None:
+    try:
+        _USAGE_FILE.write_text(json.dumps(u))
+    except Exception:
+        pass
+
+def get_daily_usage() -> dict:
+    return _load_usage()
+
+def check_budget(estimated_in: int = 1000) -> None:
+    u = _load_usage()
+    used = u["tokens_in"] + u["tokens_out"]
+    if used + estimated_in > DAILY_TOKEN_LIMIT:
+        raise DailyBudgetExceeded(
+            f"Денний ліміт {DAILY_TOKEN_LIMIT:,} токенів вичерпано "
+            f"(використано {used:,}). Спробуй завтра або підніми DAILY_TOKEN_LIMIT."
+        )
+
+def safe_messages_create(client, **kwargs):
+    """Обгортка над client.messages.create з перевіркою бюджету та обліком."""
+    # груба оцінка input — щоб не стартувати запит, який точно перевищить ліміт
+    est = 0
+    for m in kwargs.get("messages", []):
+        c = m.get("content", "")
+        if isinstance(c, str):
+            est += len(c) // 3
+    est += kwargs.get("max_tokens", 1000)
+    check_budget(estimated_in=est)
+
+    resp = client.messages.create(**kwargs)
+
+    u = _load_usage()
+    usage = getattr(resp, "usage", None)
+    if usage is not None:
+        u["tokens_in"]  += getattr(usage, "input_tokens",  0) or 0
+        u["tokens_out"] += getattr(usage, "output_tokens", 0) or 0
+    u["calls"] = u.get("calls", 0) + 1
+    _save_usage(u)
+    return resp
 
 
 # ── POSTGRESQL ───────────────────────────────────────────────────────────────
@@ -474,18 +540,19 @@ def enrich_with_scrapingdog(company: str, url: str, address: str) -> dict:
     if not html_collected:
         return {}
 
-    # Ask Claude to extract contacts from HTML
+    # Ask Claude to extract contacts from HTML (CHEAP_MODEL — Haiku 4.5, ×5 дешевше)
     client = get_anthropic_client()
     extract_prompt = (
         f"Extract contact information from this HTML for company: {company}\n"
         f"Address: {address}\n\n"
-        f"HTML content:\n{html_collected[:8000]}\n\n"
+        f"HTML content:\n{html_collected[:4000]}\n\n"
         f"Find: email address, phone number, WhatsApp, sales manager name.\n"
         f"Return ONLY JSON: {{\"email\": \"\", \"phone\": \"\", \"whatsapp\": \"\", \"contact_person\": \"\"}}"
         f"Use empty string if not found. NEVER use placeholder text."
     )
-    resp = client.messages.create(
-        model=MODEL, max_tokens=300,
+    resp = safe_messages_create(
+        client,
+        model=CHEAP_MODEL, max_tokens=300,
         messages=[{"role": "user", "content": extract_prompt}]
     )
     txt = " ".join(b.text for b in resp.content if b.type == "text")
@@ -534,7 +601,8 @@ def run_search(country: str, product: str, extra: str, status_box=None, mode: st
         add_log("🔍 Claude web_search...", "warn")
         if status_box: status_box.update(label="🔍 Claude web_search...")
         client = get_anthropic_client()
-        r1 = client.messages.create(
+        r1 = safe_messages_create(
+            client,
             model=MODEL, max_tokens=3000,
             tools=[{"type": "web_search_20250305", "name": "web_search"}],
             messages=[{"role": "user", "content":
@@ -563,8 +631,9 @@ def run_search(country: str, product: str, extra: str, status_box=None, mode: st
         # Claude formats JSON via assistant prefill
         try:
             client = get_anthropic_client()
-            r2 = client.messages.create(
-                model=MODEL, max_tokens=4000,
+            r2 = safe_messages_create(
+                client,
+                model=CHEAP_MODEL, max_tokens=2000,
                 messages=[
                     {"role": "user", "content": (
                         f"Extract suppliers from this research into a JSON array.\n\n"
@@ -760,6 +829,18 @@ with m6:
 if db_refresh:
     st.session_state["db_rev"] = st.session_state.get("db_rev", 0) + 1
     st.rerun()
+
+# ── DAILY TOKEN BUDGET INDICATOR ─────────────────────────────────────────────
+_u = get_daily_usage()
+_used = _u["tokens_in"] + _u["tokens_out"]
+_pct = min(_used / DAILY_TOKEN_LIMIT, 1.0)
+_left = max(DAILY_TOKEN_LIMIT - _used, 0)
+_color = "🟢" if _pct < 0.6 else ("🟡" if _pct < 0.9 else "🔴")
+st.caption(
+    f"{_color} **AI токени за сьогодні**: {_used:,} / {DAILY_TOKEN_LIMIT:,} "
+    f"(залишилось {_left:,}, дзвінків: {_u.get('calls',0)})"
+)
+st.progress(_pct)
 
 # ── RUN SEARCH ────────────────────────────────────────────────────────────────
 if search_btn:
@@ -1016,11 +1097,19 @@ with tab2:
                     st.caption(f"Will process: {', '.join(no_contacts['company'].dropna().tolist()[:5])}{'...' if len(no_contacts)>5 else ''}")
 
             if enrich_all_btn:
+                # обмежуємо batch на один клік — щоб не спалити токени за раз
+                batch = no_contacts.head(ENRICH_ALL_MAX_PER_CLICK)
+                total = len(batch)
+                if len(no_contacts) > total:
+                    st.info(
+                        f"ℹ️ За один клік обробляємо макс {ENRICH_ALL_MAX_PER_CLICK} компаній. "
+                        f"Залишиться {len(no_contacts) - total} — натисни ще раз після."
+                    )
                 progress = st.progress(0, text="Starting...")
                 results_placeholder = st.empty()
-                enriched, failed, total = 0, 0, len(no_contacts)
+                enriched, failed, budget_stop = 0, 0, False
 
-                for i, (_, r) in enumerate(no_contacts.iterrows()):
+                for i, (_, r) in enumerate(batch.iterrows()):
                     company = r.get("company","?")
                     progress.progress((i+1)/total, text=f"[{i+1}/{total}] 🐕 {company}...")
                     try:
@@ -1033,8 +1122,9 @@ with tab2:
                                 f"Website: {r.get('url','')}\nAddress: {r.get('address','')}\n"
                                 f"Return ONLY JSON: {{\"email\":\"\",\"phone\":\"\",\"whatsapp\":\"\",\"contact_person\":\"\"}}"
                             )
-                            resp = client.messages.create(
-                                model=MODEL, max_tokens=300,
+                            resp = safe_messages_create(
+                                client,
+                                model=CHEAP_MODEL, max_tokens=300,
                                 tools=[{"type":"web_search_20250305","name":"web_search"}],
                                 messages=[{"role":"user","content":ep}]
                             )
@@ -1054,12 +1144,19 @@ with tab2:
                             enriched += 1
                         else:
                             failed += 1
+                    except DailyBudgetExceeded as e:
+                        budget_stop = True
+                        st.warning(f"🛑 {e}")
+                        break
                     except Exception:
                         failed += 1
 
                 progress.progress(1.0, text="Done!")
                 st.session_state["db_rev"] = st.session_state.get("db_rev", 0) + 1
-                st.success(f"✅ Enriched {enriched}/{total} · Not found: {failed}")
+                msg = f"✅ Enriched {enriched}/{total} · Not found: {failed}"
+                if budget_stop:
+                    msg += " · ⚠️ зупинено через денний ліміт"
+                st.success(msg)
                 st.rerun()
 
             st.divider()
@@ -1108,7 +1205,8 @@ with tab2:
                                     f"Search /contact page, Alibaba, Made-in-China, LinkedIn.\n"
                                     f"Return ONLY JSON: {{\"email\":\"\",\"phone\":\"\",\"whatsapp\":\"\",\"contact_person\":\"\"}}"
                                 )
-                                resp = client.messages.create(
+                                resp = safe_messages_create(
+                                    client,
                                     model=MODEL, max_tokens=400,
                                     tools=[{"type": "web_search_20250305", "name": "web_search"}],
                                     messages=[{"role": "user", "content": enrich_prompt}]
@@ -1154,8 +1252,9 @@ with tab2:
                                 f"{lang_note}. Keep it concise (150-200 words). Ask about MOQ, pricing, samples.\n"
                                 f"Subject line included. Professional but friendly tone."
                             )
-                            resp = client.messages.create(
-                                model=MODEL, max_tokens=600,
+                            resp = safe_messages_create(
+                                client,
+                                model=CHEAP_MODEL, max_tokens=600,
                                 messages=[{"role": "user", "content": email_prompt}]
                             )
                             email_text = resp.content[0].text
@@ -1359,7 +1458,9 @@ with tab6:
                                 f"\n{lang_note}. 150-200 words. Ask about MOQ, pricing, samples, lead time.\n"
                                 f"Include Subject line at top. Professional but friendly."
                             )
-                            resp = client.messages.create(model=MODEL, max_tokens=700,
+                            resp = safe_messages_create(
+                                client,
+                                model=CHEAP_MODEL, max_tokens=700,
                                 messages=[{"role":"user","content":prompt}])
                             st.session_state["_out_email"] = resp.content[0].text
                         except Exception as e:
@@ -1437,7 +1538,7 @@ with tab5:
                 extract_prompt = f"""Extract all supplier/manufacturer/company information from this text.
 
 Text:
-{imp_text[:12000]}
+{imp_text[:8000]}
 
 For each company found, return a JSON object with:
 company, url, email, phone, whatsapp, address, contact_person, description, products, certs, moq, priority
@@ -1447,8 +1548,9 @@ Missing fields = empty string "".
 
 Return ONLY a valid JSON array starting with ["""
 
-                resp = client.messages.create(
-                    model=MODEL, max_tokens=4000,
+                resp = safe_messages_create(
+                    client,
+                    model=CHEAP_MODEL, max_tokens=2000,
                     messages=[
                         {"role": "user", "content": extract_prompt},
                         {"role": "assistant", "content": "["},
