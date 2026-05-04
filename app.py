@@ -601,14 +601,33 @@ def run_search(country: str, product: str, extra: str, status_box=None, mode: st
         add_log("🔍 Claude web_search...", "warn")
         if status_box: status_box.update(label="🔍 Claude web_search...")
         client = get_anthropic_client()
+
+        is_global = country in ("All countries", "🌍 Global (best worldwide)")
+        if is_global:
+            country_rules = (
+                "Search Alibaba, Made-in-China, GlobalSources, TradeKey. "
+                "Find 8-12 suppliers with contacts."
+            )
+        else:
+            country_rules = (
+                f"CRITICAL: ONLY suppliers physically located/registered in {country}. "
+                f"Do NOT include Chinese, Indian or other-country factories — "
+                f"even if they ship to {country}. "
+                f"Search local {country} business directories, "
+                f"local trade chambers, gov export portals, LinkedIn companies in {country}. "
+                f"If {country} has no merino industry — return EMPTY array []. "
+                f"Do NOT pad with suppliers from other countries. "
+                f"Quality over quantity: 0-12 suppliers, only real {country}-based ones."
+            )
+
         r1 = safe_messages_create(
             client,
             model=MODEL, max_tokens=3000,
             tools=[{"type": "web_search_20250305", "name": "web_search"}],
             messages=[{"role": "user", "content":
                 f"Find merino wool {product} manufacturers {where}. "
-                f"{('Extra: ' + extra) if extra else ''} "
-                f"Search Alibaba, Made-in-China, GlobalSources. Find 8-12 suppliers with contacts."
+                f"{('Extra: ' + extra) if extra else ''}\n\n"
+                f"{country_rules}"
             }],
         )
         n_searches = sum(1 for b in r1.content if b.type == "tool_use")
@@ -631,6 +650,13 @@ def run_search(country: str, product: str, extra: str, status_box=None, mode: st
         # Claude formats JSON via assistant prefill
         try:
             client = get_anthropic_client()
+            is_global = country in ("All countries", "🌍 Global (best worldwide)")
+            country_rule = (
+                "" if is_global
+                else f"\n\nIMPORTANT: include ONLY suppliers based in {country}. "
+                     f"Skip any company from China/India/etc unless its actual office/factory is in {country}. "
+                     f"If none qualify — return empty array []."
+            )
             r2 = safe_messages_create(
                 client,
                 model=CHEAP_MODEL, max_tokens=2000,
@@ -641,6 +667,7 @@ def run_search(country: str, product: str, extra: str, status_box=None, mode: st
                         f"Each object: company, url, email, phone, whatsapp, address, "
                         f"contact_person, description, products, certs, moq, "
                         f"priority(HIGH/MEDIUM/LOW). Missing = empty string."
+                        f"{country_rule}"
                     )},
                     {"role": "assistant", "content": "["},
                 ],
@@ -660,6 +687,67 @@ def run_search(country: str, product: str, extra: str, status_box=None, mode: st
         return 0
     if not isinstance(parsed, list):
         parsed = [parsed]
+
+    # ── COUNTRY POST-FILTER ──────────────────────────────────────────────────
+    # відкидаємо постачальників, у яких НЕМАЄ жодної згадки країни/міста/cc/телефонного коду
+    is_global = country in ("All countries", "🌍 Global (best worldwide)")
+    if not is_global and parsed:
+        country_low = country.lower()
+        # маркери: ccTLD, телефонний код (+xx), типові міста/регіони/синоніми
+        # додавати країну лише якщо вона є в COUNTRIES → інакше fallback на просту перевірку
+        markers_map = {
+            "china":        ["china", "cn", "+86", "shanghai", "guangzhou", "shenzhen", "ningbo", "qingdao", "tianjin", "beijing", "zhejiang", "jiangsu", "fujian", "shandong", "guangdong", "inner mongolia"],
+            "vietnam":      ["vietnam", "viet nam", ".vn", "+84", "hanoi", "ho chi minh", "saigon", "haiphong", "da nang", "binh duong"],
+            "bangladesh":   ["bangladesh", ".bd", "+880", "dhaka", "chittagong", "narayanganj", "gazipur"],
+            "india":        ["india", ".in", "+91", "ludhiana", "tirupur", "mumbai", "delhi", "panipat", "kanpur", "punjab", "tamil nadu", "haryana", "bhilwara"],
+            "thailand":     ["thailand", ".th", "+66", "bangkok", "chiang mai"],
+            "indonesia":    ["indonesia", ".id", "+62", "jakarta", "bandung", "surabaya"],
+            "cambodia":     ["cambodia", ".kh", "+855", "phnom penh"],
+            "myanmar":      ["myanmar", "burma", ".mm", "+95", "yangon"],
+            "sri lanka":    ["sri lanka", ".lk", "+94", "colombo", "katunayake"],
+            "pakistan":     ["pakistan", ".pk", "+92", "karachi", "lahore", "faisalabad", "sialkot"],
+            "nepal":        ["nepal", ".np", "+977", "kathmandu", "lalitpur"],
+            "australia":    ["australia", ".au", "+61", "sydney", "melbourne", "brisbane", "perth", "victoria", "queensland", "tasmania"],
+            "new zealand":  ["new zealand", ".nz", "+64", "auckland", "wellington", "christchurch", "dunedin"],
+            "mongolia":     ["mongolia", ".mn", "+976", "ulaanbaatar", "ulan bator"],
+            "fiji":         ["fiji", ".fj", "+679", "suva", "nadi", "lautoka"],
+            "turkey":       ["turkey", "türkiye", "turkiye", ".tr", "+90", "istanbul", "izmir", "bursa", "ankara"],
+            "romania":      ["romania", ".ro", "+40", "bucharest", "cluj"],
+            "bulgaria":     ["bulgaria", ".bg", "+359", "sofia"],
+            "italy":        ["italy", "italia", ".it", "+39", "milan", "milano", "prato", "biella", "vicenza"],
+            "portugal":     ["portugal", ".pt", "+351", "lisbon", "porto", "guimaraes"],
+            "poland":       ["poland", "polska", ".pl", "+48", "warsaw", "lodz", "krakow"],
+            "czech republic": ["czech", ".cz", "+420", "prague", "brno"],
+            "serbia":       ["serbia", ".rs", "+381", "belgrade"],
+            "lithuania":    ["lithuania", ".lt", "+370", "vilnius", "kaunas"],
+            "hungary":      ["hungary", ".hu", "+36", "budapest"],
+            "morocco":      ["morocco", ".ma", "+212", "casablanca", "tangier", "rabat"],
+            "peru":         ["peru", "perú", ".pe", "+51", "lima", "arequipa"],
+            "argentina":    ["argentina", ".ar", "+54", "buenos aires"],
+            "uruguay":      ["uruguay", ".uy", "+598", "montevideo"],
+            "south africa": ["south africa", ".za", "+27", "johannesburg", "cape town", "durban"],
+            "ethiopia":     ["ethiopia", ".et", "+251", "addis ababa"],
+        }
+        markers = markers_map.get(country_low, [country_low])
+        before = len(parsed)
+        kept = []
+        for r in parsed:
+            haystack = (
+                str(r.get("address","")) + " " +
+                str(r.get("description","")) + " " +
+                str(r.get("url","")) + " " +
+                str(r.get("phone","")) + " " +
+                str(r.get("email",""))
+            ).lower()
+            if any(mk in haystack for mk in markers):
+                kept.append(r)
+        dropped = before - len(kept)
+        if dropped:
+            add_log(f"🌐 Country filter: {country} → kept {len(kept)}/{before} (dropped {dropped} non-{country})", "warn")
+        parsed = kept
+        if not parsed:
+            add_log(f"⚠️ Жодного постачальника з {country} не знайдено", "warn")
+            return 0
 
     # ── DEDUP + SAVE ─────────────────────────────────────────────────────────
     existing_session = {(r.get("company","") + r.get("url","")).lower() for r in st.session_state.results}
