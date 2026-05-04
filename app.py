@@ -562,11 +562,11 @@ def enrich_with_scrapingdog(company: str, url: str, address: str) -> dict:
         return {k: clean_contact(v) for k, v in found.items()}
     return {}
 
-def run_search(country: str, product: str, extra: str, status_box=None, mode: str = "auto"):
+def run_search(country: str, product: str, extra: str, status_box=None, mode: str = "auto", force: bool = False):
     where = "globally, find the best worldwide" if country in ("All countries", "🌍 Global (best worldwide)") else f"in {country}"
 
-    # cache check
-    if was_searched_recently(country, product, 7):
+    # cache check (skip if force=True)
+    if not force and was_searched_recently(country, product, 7):
         add_log(f"⏭️ Skipped (< 7d): **{product}** / **{country}**", "warn")
         return 0
 
@@ -872,6 +872,8 @@ with col3:
 with col4:
     st.write("")
     search_btn = st.button("▶ Search", type="primary", use_container_width=True)
+    force_rerun = st.checkbox("🔁 Ignore cache (force)", key="force_rerun",
+                               help="Запустити пошук, навіть якщо ту саму комбінацію вже шукали < 7 днів тому")
 with col5:
     st.write("")
     clear_btn = st.button("✕ Clear", use_container_width=True)
@@ -937,22 +939,27 @@ if search_btn:
     total_new = 0
     combos = [(c, p) for c in countries for p in products]
 
-    # show cache preview
-    cached = [(c,p) for c,p in combos if was_searched_recently(c, p, 7)]
-    fresh  = [(c,p) for c,p in combos if not was_searched_recently(c, p, 7)]
+    # show cache preview (skip cache check if user ticked "Ignore cache")
+    if force_rerun:
+        cached, fresh = [], list(combos)
+        st.info("🔁 Кеш ігноруємо — запускаємо все наново.")
+    else:
+        cached = [(c,p) for c,p in combos if was_searched_recently(c, p, 7)]
+        fresh  = [(c,p) for c,p in combos if not was_searched_recently(c, p, 7)]
     if cached:
         st.info(f"⏭️ **{len(cached)}** уже искали (< 7 дней) — пропускаем: "
                 + ", ".join(f"{p}/{c}" for c,p in cached[:3])
-                + ("..." if len(cached)>3 else ""))
+                + ("..." if len(cached)>3 else "")
+                + " · постав 🔁 Ignore cache і натисни ще раз, щоб не пропускати")
     if not fresh:
-        st.warning("Все комбинации уже искали недавно. Поиск не запущен.")
+        st.warning("Все комбинации уже искали недавно. Поиск не запущен. Постав 🔁 Ignore cache (force) щоб запустити заново.")
         st.stop()
-    for i, (c, p) in enumerate(combos):
+    for i, (c, p) in enumerate(fresh):
         label = f"[{i+1}/{len(combos)}] {p} / {c}"
         with st.status(label, expanded=True) as status:
             status.write(f"🚀 Starting search...")
             try:
-                n = run_search(c, p, extra, status_box=status, mode=search_mode)
+                n = run_search(c, p, extra, status_box=status, mode=search_mode, force=force_rerun)
                 total_new += n
                 status.update(label=f"✅ {label} — found {n} new", state="complete")
             except Exception as e:
