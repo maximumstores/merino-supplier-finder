@@ -26,7 +26,7 @@ COUNTRIES = [
     # Asia Pacific
     "China", "Vietnam", "Bangladesh", "India", "Thailand",
     "Indonesia", "Cambodia", "Myanmar", "Sri Lanka", "Pakistan", "Nepal",
-    "Australia", "New Zealand", "Mongolia",
+    "Australia", "New Zealand", "Mongolia", "Fiji",
     # Europe & Middle East
     "Turkey", "Romania", "Bulgaria", "Italy", "Portugal",
     "Poland", "Czech Republic", "Serbia", "Lithuania", "Hungary", "Morocco",
