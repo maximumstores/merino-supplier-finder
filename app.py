@@ -184,10 +184,13 @@ def init_db():
                     search_product TEXT,
                     status      TEXT DEFAULT 'New',
                     notes       TEXT DEFAULT '',
+                    source      TEXT DEFAULT '',
                     created_at  TIMESTAMP DEFAULT NOW(),
                     UNIQUE(company, url)
                 )
             """)
+            # міграція для існуючих БД — додаємо source якщо ще нема
+            cur.execute("ALTER TABLE merino_suppliers ADD COLUMN IF NOT EXISTS source TEXT DEFAULT ''")
         conn.commit()
 
 def get_setting(key: str, default: str = "") -> str:
@@ -219,8 +222,9 @@ def get_smtp_config() -> dict:
         "signature": get_setting("smtp_signature", "Best regards,\nmerino.tech sourcing team"),
     }
 
-def save_to_db(rows: list, country: str, product: str) -> int:
-    """Insert rows, skip duplicates. Returns count inserted."""
+def save_to_db(rows: list, country: str, product: str, source: str = "") -> int:
+    """Insert rows, skip duplicates. Returns count inserted.
+    `source` — звідки запис: 'import:manual', 'search:claude', 'search:scrapingdog' тощо."""
     if not rows:
         return 0
     values = [
@@ -229,7 +233,7 @@ def save_to_db(rows: list, country: str, product: str) -> int:
             r.get("phone",""), r.get("whatsapp",""), r.get("wechat",""),
             r.get("address",""), r.get("contact_person",""), r.get("description",""),
             r.get("products",""), r.get("certs",""), r.get("moq",""),
-            r.get("priority",""), country, product,
+            r.get("priority",""), country, product, source,
         )
         for r in rows
     ]
@@ -238,7 +242,7 @@ def save_to_db(rows: list, country: str, product: str) -> int:
             execute_values(cur, """
                 INSERT INTO merino_suppliers
                   (company,url,email,phone,whatsapp,wechat,address,contact_person,
-                   description,products,certs,moq,priority,search_country,search_product)
+                   description,products,certs,moq,priority,search_country,search_product,source)
                 VALUES %s
                 ON CONFLICT (company, url) DO NOTHING
             """, values)
@@ -303,6 +307,10 @@ def region_flag(addr: str) -> str:
         ("🇰🇭 Cambodia",    r"cambodia|phnom penh|kh$"),
         ("🇲🇲 Myanmar",     r"myanmar|burma|yangon|mm$"),
         ("🇱🇰 Sri Lanka",   r"sri lanka|colombo|lk$"),
+        ("🇫🇯 Fiji",        r"fiji|suva|nadi|lautoka|fj$|\+679"),
+        ("🇳🇵 Nepal",       r"nepal|kathmandu|lalitpur|np$|\+977"),
+        ("🇱🇹 Lithuania",   r"lithuania|vilnius|kaunas|lt$|\+370"),
+        ("🇭🇺 Hungary",     r"hungary|budapest|hu$|\+36"),
     ]
     for label, pattern in REGIONS:
         if re.search(pattern, a):
@@ -774,7 +782,9 @@ def run_search(country: str, product: str, extra: str, status_box=None, mode: st
     add_log(" · ".join(parts))
 
     try:
-        save_to_db(fresh, country, product)
+        # source = режим, через який знайдено: 'search:scrapingdog' / 'search:claude_websearch'
+        src = "search:scrapingdog" if mode == "🐕 ScrapingDog" else "search:claude_websearch"
+        save_to_db(fresh, country, product, source=src)
         st.session_state["db_rev"] = st.session_state.get("db_rev", 0) + 1
     except Exception as e:
         add_log(f"DB: {e}", "warn")
@@ -986,7 +996,18 @@ def render_table(df: pd.DataFrame, allow_edit: bool = False):
         return
 
     df = df.copy()
-    df["region"] = df.get("address", pd.Series([""] * len(df))).fillna("").apply(region_flag)
+    # region: спочатку шукаємо по address; якщо "🌐 Other" — пробуємо phone/whatsapp і search_country
+    def _row_flag(r):
+        f = region_flag(str(r.get("address","") or ""))
+        if f != "🌐 Other":
+            return f
+        ph = str(r.get("phone","") or "") + " " + str(r.get("whatsapp","") or "")
+        f2 = region_flag(ph)
+        if f2 != "🌐 Other":
+            return f2
+        sc = str(r.get("search_country","") or "")
+        return region_flag(sc)
+    df["region"] = df.apply(_row_flag, axis=1)
     # mark rows with real contacts
     df["✉️"] = df.apply(lambda r: "✅" if (r.get("email","") or r.get("phone","") or r.get("whatsapp","")) else "—", axis=1)
     df["⭐"] = df.apply(lambda r: score_emoji(calc_score(r)), axis=1)
@@ -1078,15 +1099,28 @@ def render_table(df: pd.DataFrame, allow_edit: bool = False):
 
     st.caption(f"Showing **{len(df_f)}** of {len(df)} suppliers")
 
-    show_cols = ["⭐","in_db","✉️","region","company","status","url","email","phone","whatsapp","wechat","products","certs","priority","notes","quotes"]
+    # ── source-icon column (звідки запис: 📥 Import / 🔍 Search) ──────────────
+    if "source" in df_f.columns:
+        def _src_icon(s: str) -> str:
+            s = (s or "").lower()
+            if s.startswith("import"): return "📥"
+            if "scrapingdog" in s:     return "🐕"
+            if "claude" in s:          return "🤖"
+            if "search" in s:          return "🔍"
+            return ""
+        df_f = df_f.copy()
+        df_f["src"] = df_f["source"].fillna("").map(_src_icon)
+
+    show_cols = ["⭐","in_db","src","✉️","region","company","status","url","email","phone","whatsapp","wechat","products","certs","priority","notes","quotes"]
     if "status" in df_f.columns:
-        show_cols = ["⭐","✉️","region","company","status","url","email","phone","whatsapp","wechat","products","certs","priority","notes","quotes"]
+        show_cols = ["⭐","src","✉️","region","company","status","url","email","phone","whatsapp","wechat","products","certs","priority","notes","quotes"]
     existing = [c for c in show_cols if c in df_f.columns]
 
     cfg = {
         "url": st.column_config.LinkColumn(),
         "⭐": st.column_config.TextColumn("Score", width="small"),
         "in_db": st.column_config.TextColumn("DB", width="small"),
+        "src": st.column_config.TextColumn("📥/🔍", width="small", help="Звідки запис: 📥 Import · 🐕 ScrapingDog · 🤖 Claude · 🔍 інше"),
         "✉️": st.column_config.TextColumn("📬", width="small"),
         "wechat": st.column_config.TextColumn("💬 WeChat", width="small"),
         "notes": st.column_config.TextColumn("📝 Notes", width="medium"),
@@ -1642,17 +1676,49 @@ with tab5:
     st.markdown("**📥 Import from document / text**")
     st.caption("Вставь текст с описанием поставщиков — AI извлечёт компании, email, телефоны и добавит в базу")
 
+    # ── COUNTRY для імпорту ─────────────────────────────────────────────────
+    imp_c1, imp_c2 = st.columns([2, 3])
+    with imp_c1:
+        imp_country_select = st.selectbox(
+            "🌍 Country (для всіх записів з цього імпорту)",
+            ["— Auto-detect from phone/text —"] + COUNTRIES,
+            key="imp_country_select",
+            help="Якщо вибрано — всі записи отримають цей прапор країни. Якщо Auto — визначаємо за телефонним кодом / текстом."
+        )
+    with imp_c2:
+        imp_country_custom = st.text_input(
+            "Or type country (overrides above)",
+            placeholder="Fiji, Samoa, Tonga... — пусто = використати dropdown",
+            key="imp_country_custom"
+        )
+    # фінальна країна для цього імпорту: custom > select > auto
+    imp_country = (
+        imp_country_custom.strip()
+        if imp_country_custom.strip()
+        else (imp_country_select if imp_country_select != "— Auto-detect from phone/text —" else "")
+    )
+
     imp_text = st.text_area("Paste text here", height=200, placeholder="Вставь любой текст: отчёт, статью, список поставщиков...", key="import_text")
 
     imp_col1, imp_col2 = st.columns([1, 4])
     with imp_col1:
         import_btn = st.button("🤖 Extract & Import", type="primary", use_container_width=True, disabled=not imp_text.strip())
+    with imp_col2:
+        if imp_country:
+            st.caption(f"🏷️ Всі записи будуть позначені як **{imp_country}**")
+        else:
+            st.caption("🤖 Країна буде визначена автоматично за телефоном (+679 → Fiji, +86 → China, …) або текстом")
 
     if import_btn and imp_text.strip():
         with st.status("Extracting suppliers from text...", expanded=True) as imp_status:
             try:
                 imp_status.write("🤖 Claude reading document...")
                 client = get_anthropic_client()
+                country_hint = (
+                    f"\n\nIMPORTANT: All companies in this text are from {imp_country}. "
+                    f"Set address field to include '{imp_country}' if missing."
+                    if imp_country else ""
+                )
                 extract_prompt = f"""Extract all supplier/manufacturer/company information from this text.
 
 Text:
@@ -1662,7 +1728,7 @@ For each company found, return a JSON object with:
 company, url, email, phone, whatsapp, address, contact_person, description, products, certs, moq, priority
 
 priority = HIGH (has direct email+phone) | MEDIUM (has email or phone) | LOW (no contacts)
-Missing fields = empty string "".
+Missing fields = empty string "".{country_hint}
 
 Return ONLY a valid JSON array starting with ["""
 
@@ -1684,6 +1750,40 @@ Return ONLY a valid JSON array starting with ["""
                     if not isinstance(parsed, list):
                         parsed = [parsed]
 
+                    # ── COUNTRY TAG: примусово прописуємо країну в address ──
+                    # Auto-detect по phone country code, якщо imp_country не задано
+                    PHONE_CC = {
+                        "+679":"Fiji","+86":"China","+91":"India","+84":"Vietnam",
+                        "+880":"Bangladesh","+92":"Pakistan","+94":"Sri Lanka",
+                        "+977":"Nepal","+95":"Myanmar","+855":"Cambodia","+66":"Thailand",
+                        "+62":"Indonesia","+976":"Mongolia","+61":"Australia","+64":"New Zealand",
+                        "+90":"Turkey","+40":"Romania","+359":"Bulgaria","+39":"Italy",
+                        "+351":"Portugal","+48":"Poland","+420":"Czech Republic","+381":"Serbia",
+                        "+370":"Lithuania","+36":"Hungary","+212":"Morocco","+51":"Peru",
+                        "+54":"Argentina","+598":"Uruguay","+27":"South Africa","+251":"Ethiopia",
+                    }
+                    def _detect_country(rec: dict) -> str:
+                        if imp_country:
+                            return imp_country
+                        ph = (str(rec.get("phone","")) + " " + str(rec.get("whatsapp",""))).strip()
+                        for cc, cn in PHONE_CC.items():
+                            if cc in ph:
+                                return cn
+                        # fallback — шукаємо в адресі
+                        addr = str(rec.get("address","")).lower()
+                        for cn in COUNTRIES:
+                            if cn.lower() in addr and cn not in ("All countries","🌍 Global (best worldwide)"):
+                                return cn
+                        return ""
+
+                    for r in parsed:
+                        detected = _detect_country(r)
+                        if detected:
+                            addr = str(r.get("address","")).strip()
+                            # додаємо країну до адреси якщо її там ще немає
+                            if detected.lower() not in addr.lower():
+                                r["address"] = (addr + (", " if addr else "") + detected).strip(", ")
+
                     # dedup against DB
                     try:
                         df_ex = load_from_db()
@@ -1695,10 +1795,13 @@ Return ONLY a valid JSON array starting with ["""
                              if (r.get("company","") + r.get("url","")).lower() not in existing_db]
 
                     if fresh:
-                        inserted = save_to_db(fresh, "Import", "manual")
+                        # search_country = імпортована країна, якщо вказана (інакше "Import")
+                        save_country = imp_country if imp_country else "Import"
+                        inserted = save_to_db(fresh, save_country, "manual", source="import:text")
                         st.session_state["db_rev"] = st.session_state.get("db_rev", 0) + 1
-                        imp_status.update(label=f"✅ Extracted {len(parsed)} · Added {len(fresh)} new to DB", state="complete")
-                        st.success(f"✅ Added **{len(fresh)}** suppliers to Database")
+                        tag = f" ({imp_country})" if imp_country else " (auto-detected)"
+                        imp_status.update(label=f"✅ Extracted {len(parsed)} · Added {len(fresh)} new to DB{tag}", state="complete")
+                        st.success(f"✅ Added **{len(fresh)}** suppliers to Database{tag}")
 
                         # preview
                         df_prev = pd.DataFrame(fresh)
@@ -1764,7 +1867,7 @@ Return ONLY a valid JSON array starting with ["""
                 orig = next((c for c in candidates if c.get("company") == row.get("company")), row)
                 full_rows.append(clean_row(orig))
             if full_rows:
-                inserted = save_to_db(full_rows, "Import", "manual")
+                inserted = save_to_db(full_rows, "Import", "manual", source="import:review")
                 st.session_state["db_rev"] = st.session_state.get("db_rev", 0) + 1
                 st.session_state.pop("_import_candidates", None)
                 st.success(f"✅ Imported **{len(full_rows)}** suppliers to Database!")
