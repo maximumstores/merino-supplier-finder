@@ -1107,19 +1107,42 @@ def render_table(df: pd.DataFrame, allow_edit: bool = False):
         edited = st.data_editor(df_f[existing], use_container_width=True, height=520,
                                 hide_index=True, column_config=cfg,
                                 key=f"editor_{allow_edit}")
-        # save status changes back to DB
-        if "status" in edited.columns and "id" in df_f.columns:
-            changed = edited[edited["status"].fillna("New") != df_f.loc[edited.index,"status"].fillna("New")]
-            if not changed.empty:
+
+        # ── save ALL edited columns back to DB ────────────────────────────────
+        # колонки які реально існують в БД (не службові вроде ⭐ / ✉️ / in_db / region)
+        DB_COLUMNS = {"company","url","email","phone","whatsapp","wechat","address",
+                      "contact_person","description","products","certs","moq","priority",
+                      "status","notes","quotes"}
+        if "id" in df_f.columns:
+            editable_cols = [c for c in edited.columns if c in DB_COLUMNS]
+            updates_to_apply = []  # list of (id, col, val)
+            for idx in edited.index:
+                if idx not in df_f.index:
+                    continue
+                rid = df_f.loc[idx, "id"]
+                if pd.isna(rid):
+                    continue
+                for col in editable_cols:
+                    new_val = edited.at[idx, col]
+                    old_val = df_f.at[idx, col] if col in df_f.columns else None
+                    # порівнюємо як рядки з нормалізацією NaN/None → ""
+                    new_s = "" if pd.isna(new_val) else str(new_val)
+                    old_s = "" if pd.isna(old_val) else str(old_val)
+                    if new_s != old_s:
+                        updates_to_apply.append((int(rid), col, new_s))
+
+            if updates_to_apply:
                 try:
                     with get_db() as conn:
                         with conn.cursor() as cur:
-                            for idx, row in changed.iterrows():
-                                orig_id = df_f.loc[idx,"id"]
-                                cur.execute("UPDATE merino_suppliers SET status=%s WHERE id=%s",
-                                            (str(row["status"]), int(orig_id)))
+                            for rid, col, val in updates_to_apply:
+                                cur.execute(
+                                    f"UPDATE merino_suppliers SET {col}=%s WHERE id=%s",
+                                    (val, rid),
+                                )
                         conn.commit()
                     st.session_state["db_rev"] = st.session_state.get("db_rev", 0) + 1
+                    st.toast(f"💾 Збережено: {len(updates_to_apply)} змін")
                 except Exception as e:
                     st.warning(f"Save error: {e}")
 
@@ -1892,4 +1915,4 @@ with tab3:
                                    plot_bgcolor="white")
                 st.plotly_chart(fig4, use_container_width=True)
     except Exception as e:
-        st.error(f"Chart error: {e}") 
+        st.error(f"Chart error: {e}")
