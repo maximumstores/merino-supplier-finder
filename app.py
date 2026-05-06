@@ -1732,14 +1732,25 @@ Missing fields = empty string "".{country_hint}
 
 Return ONLY a valid JSON array starting with ["""
 
-                resp = safe_messages_create(
-                    client,
+                # Імпорт — БЕЗ денного ліміту (важлива функція, завжди має працювати).
+                # Облік токенів все одно ведемо, щоб індикатор показував реальний стан.
+                resp = client.messages.create(
                     model=CHEAP_MODEL, max_tokens=2000,
                     messages=[
                         {"role": "user", "content": extract_prompt},
                         {"role": "assistant", "content": "["},
                     ],
                 )
+                # вручну записуємо usage (бо обхід safe_messages_create)
+                try:
+                    _u = _load_usage()
+                    _u["tokens_in"]  += getattr(resp.usage, "input_tokens",  0) or 0
+                    _u["tokens_out"] += getattr(resp.usage, "output_tokens", 0) or 0
+                    _u["calls"] = _u.get("calls", 0) + 1
+                    _save_usage(_u)
+                except Exception:
+                    pass
+
                 raw = " ".join(b.text for b in resp.content if b.type == "text")
                 full = "[" + raw
                 m = re.search(r"\[[\s\S]*\]", full)
