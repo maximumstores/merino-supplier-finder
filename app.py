@@ -317,6 +317,117 @@ def get_smtp_config() -> dict:
         "signature": get_setting("smtp_signature", "Best regards,\nmerino.tech sourcing team"),
     }
 
+def get_imap_config() -> dict:
+    """IMAP — для перевірки вхідних відповідей."""
+    return {
+        "host": get_setting("imap_host", "imap.gmail.com"),
+        "port": int(get_setting("imap_port", "993")),
+        "user": get_setting("imap_user", ""),
+        "passw": get_setting("imap_pass", ""),
+    }
+
+def mark_replied(supplier_id: int, reply_subject: str = "", reply_from: str = "") -> None:
+    """Поставити Replied + replied_at + опційно записати в notes."""
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE merino_suppliers SET status='Replied', replied_at=NOW() WHERE id=%s",
+                    (int(supplier_id),)
+                )
+            conn.commit()
+        log_activity("got_reply", f"id={supplier_id}", f"from={reply_from} subj={reply_subject[:80]}")
+    except Exception as e:
+        log_activity("got_reply_error", f"id={supplier_id}", str(e)[:200])
+
+def fetch_imap_replies(days_back: int = 30, max_messages: int = 200) -> dict:
+    """Сканує inbox через IMAP, шукає листи від email-ів постачальників.
+    Повертає: {emails_checked, replies_found, marked_replied, errors}."""
+    import imaplib
+    import email as email_module
+    from email.utils import parseaddr
+    from datetime import timedelta
+
+    cfg = get_imap_config()
+    if not (cfg["user"] and cfg["passw"] and cfg["host"]):
+        return {"error": "IMAP не налаштовано (user/pass/host у Settings)"}
+
+    # витягуємо всі email-и постачальників, які чекають відповіді
+    try:
+        with get_db() as conn:
+            df_pending = pd.read_sql(
+                """SELECT id, company, email FROM merino_suppliers
+                   WHERE status='Contacted'
+                     AND email IS NOT NULL AND email != ''""",
+                conn,
+            )
+    except Exception as e:
+        return {"error": f"DB read failed: {e}"}
+
+    if df_pending.empty:
+        return {"emails_checked": 0, "replies_found": 0, "marked_replied": 0,
+                "errors": ["Немає компаній зі статусом Contacted з email — нічого перевіряти."]}
+
+    # email → supplier id (для швидкого пошуку)
+    email_to_id = {}
+    for _, r in df_pending.iterrows():
+        em = str(r["email"]).strip().lower()
+        if em and em not in email_to_id:
+            email_to_id[em] = (int(r["id"]), str(r["company"]))
+
+    marked = 0
+    replies_found = 0
+    errors = []
+
+    try:
+        M = imaplib.IMAP4_SSL(cfg["host"], cfg["port"])
+        M.login(cfg["user"], cfg["passw"])
+        M.select("INBOX")
+
+        # шукаємо листи за останні N днів
+        since_date = (datetime.now() - timedelta(days=days_back)).strftime("%d-%b-%Y")
+        typ, data = M.search(None, f'(SINCE "{since_date}")')
+        if typ != "OK":
+            errors.append(f"IMAP search failed: {typ}")
+            return {"emails_checked": 0, "replies_found": 0, "marked_replied": 0, "errors": errors}
+
+        msg_ids = data[0].split()[-max_messages:]  # останні N
+
+        for msg_id in msg_ids:
+            try:
+                typ, msg_data = M.fetch(msg_id, "(BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE)])")
+                if typ != "OK" or not msg_data or not msg_data[0]:
+                    continue
+                raw_header = msg_data[0][1]
+                msg = email_module.message_from_bytes(raw_header)
+                from_raw = msg.get("From", "")
+                subject = msg.get("Subject", "")
+                _, from_addr = parseaddr(from_raw)
+                from_addr = from_addr.lower().strip()
+                if not from_addr:
+                    continue
+                if from_addr in email_to_id:
+                    sup_id, sup_company = email_to_id[from_addr]
+                    mark_replied(sup_id, subject, from_addr)
+                    marked += 1
+                    replies_found += 1
+                    # видаляємо з map щоб не позначати двічі
+                    del email_to_id[from_addr]
+            except Exception as msg_err:
+                errors.append(f"msg {msg_id}: {msg_err}")
+
+        M.close()
+        M.logout()
+    except Exception as e:
+        errors.append(f"IMAP error: {e}")
+
+    return {
+        "emails_checked": len(msg_ids) if 'msg_ids' in locals() else 0,
+        "replies_found": replies_found,
+        "marked_replied": marked,
+        "errors": errors,
+    }
+
 def save_to_db(rows: list, country: str, product: str, source: str = "") -> int:
     """Insert rows, skip duplicates. Returns count inserted.
     `source` — звідки запис: 'import:manual', 'search:claude', 'search:scrapingdog' тощо."""
@@ -1975,6 +2086,25 @@ with tab6:
                     with sb2:
                         st.caption("SMTP_HOST / SMTP_PORT / SMTP_USER / SMTP_PASS / SMTP_FROM → Streamlit Secrets")
 
+                # ── GOT REPLY button (для обраної компанії) ──────────────────
+                if out_company and out_row.get("id"):
+                    st.divider()
+                    gr1, gr2 = st.columns([1, 4])
+                    with gr1:
+                        if st.button(f"📥 Got reply від {out_company[:25]}",
+                                     key="out_got_reply",
+                                     use_container_width=True,
+                                     help="Поставити статус Replied + записати дату відповіді"):
+                            mark_replied(int(out_row["id"]))
+                            st.session_state["db_rev"] = st.session_state.get("db_rev", 0) + 1
+                            st.success(f"✅ {out_company} → Status: Replied")
+                            st.rerun()
+                    with gr2:
+                        st.caption(
+                            "💡 Натисни коли постачальник відповів. "
+                            "Або налаштуй IMAP у Settings — буде автоматично визначати відповіді."
+                        )
+
             # ─────────────────────────────────────────────────────────────────
             # ── BULK SEND (массова розсилка) ─────────────────────────────────
             # ─────────────────────────────────────────────────────────────────
@@ -2523,13 +2653,65 @@ with tab7:
             st.error(f"❌ {e}")
 
     st.divider()
+    # ── IMAP — авто-перевірка вхідних відповідей ───────────────────────────
+    st.markdown("##### 📥 IMAP — авто-перевірка вхідної пошти на відповіді")
+    st.caption(
+        "Сканує inbox і автоматично ставить **Replied** тим компаніям, "
+        "що відповіли на твій лист. Працює лише якщо постачальник відповів "
+        "з того самого email на який ти писала."
+    )
+    imap_cfg = get_imap_config()
+    im1, im2 = st.columns(2)
+    with im1:
+        imap_host = st.text_input("IMAP host", value=imap_cfg["host"], key="cfg_imap_host",
+                                   placeholder="imap.gmail.com")
+        imap_user = st.text_input("IMAP username (email)", value=imap_cfg["user"], key="cfg_imap_user",
+                                   placeholder="m.belyakova@maximumstores.online")
+    with im2:
+        imap_port = st.text_input("IMAP port", value=str(imap_cfg["port"]), key="cfg_imap_port",
+                                   placeholder="993")
+        imap_pass = st.text_input("IMAP password / App password", value=imap_cfg["passw"],
+                                   type="password", key="cfg_imap_pass",
+                                   placeholder="той самий App Password що для SMTP")
+
+    is1, is2 = st.columns([1, 1])
+    with is1:
+        if st.button("💾 Зберегти IMAP", key="save_imap_btn", type="primary", use_container_width=True):
+            set_setting("imap_host", imap_host)
+            set_setting("imap_port", imap_port)
+            set_setting("imap_user", imap_user)
+            set_setting("imap_pass", imap_pass)
+            st.success("✅ IMAP збережено.")
+    with is2:
+        days_back = st.number_input("Сканувати останні (днів)", min_value=1, max_value=365, value=30, step=7, key="imap_days_back")
+
+    if st.button("🔍 Сканувати inbox зараз", key="scan_imap_btn", type="secondary", use_container_width=True):
+        with st.spinner(f"Підключаємось до {imap_host}..."):
+            result = fetch_imap_replies(days_back=int(days_back))
+        if "error" in result:
+            st.error(f"❌ {result['error']}")
+        else:
+            st.success(
+                f"✅ Перевірено листів: **{result['emails_checked']}** · "
+                f"знайдено відповідей від постачальників: **{result['replies_found']}** · "
+                f"оновлено статусів: **{result['marked_replied']}**"
+            )
+            if result["errors"]:
+                with st.expander(f"⚠️ Помилки ({len(result['errors'])})"):
+                    for err in result["errors"][:20]:
+                        st.code(err)
+            if result["marked_replied"]:
+                st.session_state["db_rev"] = st.session_state.get("db_rev", 0) + 1
+
+    st.divider()
     st.markdown("##### 📋 Gmail App Password — инструкция")
     st.markdown("""
 1. Открой [myaccount.google.com](https://myaccount.google.com)
 2. **Security** → включи **2-Step Verification**
 3. **Security** → **App passwords** → выбери "Mail" + устройство
-4. Скопируй 16-значный пароль → вставь в **SMTP password** выше
+4. Скопируй 16-значный пароль → вставь в **SMTP password** + **IMAP password** выше (один и тот же)
 5. В **SMTP host** используй `smtp.gmail.com`, порт `587`
+6. В **IMAP host** используй `imap.gmail.com`, порт `993`
     """)
 
     st.divider()
