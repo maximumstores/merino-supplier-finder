@@ -212,6 +212,26 @@ def set_setting(key: str, value: str):
             """, (key, value))
         conn.commit()
 
+def get_products_list() -> list:
+    """Список продуктів для dropdown в колонці 'products'. Зберігається в app_settings."""
+    raw = get_setting("products_list", "")
+    if raw:
+        try:
+            data = json.loads(raw)
+            if isinstance(data, list) and all(isinstance(x, str) for x in data):
+                return data
+        except Exception:
+            pass
+    # default — той самий список що використовується в пошуку
+    return list(PRODUCTS) + [
+        "blankets / throws", "scarves", "beanies / hats", "gloves / mittens",
+        "merino bedding", "merino t-shirt", "merino dress",
+    ]
+
+def save_products_list(items: list) -> None:
+    """Зберегти кастомний список продуктів."""
+    set_setting("products_list", json.dumps([str(x).strip() for x in items if str(x).strip()]))
+
 def get_smtp_config() -> dict:
     return {
         "host":  get_setting("smtp_host",  "smtp.gmail.com"),
@@ -1139,6 +1159,18 @@ def render_table(df: pd.DataFrame, allow_edit: bool = False):
             "Status", options=["New","Contacted","Replied","Negotiating","Deal","Rejected","🗄️ Archived"],
             width="small"
         )
+    if allow_edit and "products" in df_f.columns:
+        # SelectboxColumn вимагає щоб всі існуючі значення були в options →
+        # додаємо до списку всі унікальні значення які вже є в БД
+        _products_opts = list(get_products_list())
+        _existing_vals = [v for v in df_f["products"].dropna().unique().tolist() if v]
+        for v in _existing_vals:
+            if v not in _products_opts:
+                _products_opts.append(v)
+        cfg["products"] = st.column_config.SelectboxColumn(
+            "Products", options=_products_opts, width="medium",
+            help="Тип продукту. Список можна редагувати у вкладці ⚙️ Settings."
+        )
 
     if allow_edit:
         edited = st.data_editor(df_f[existing], use_container_width=True, height=520,
@@ -1688,17 +1720,22 @@ with tab6:
             _has_email = df_out_f["email"].fillna("").str.strip().str.len() > 0
             df_with_email = df_out_f[_has_email].copy()
             if df_with_email.empty:
-                st.warning("⚠️ В поточному фільтрі немає компаній з email. Уточни фільтри вище.")
+                st.info("ℹ️ В поточному фільтрі немає компаній з email — можеш все одно додати email вручну нижче.")
+                bulk_company_options = []
+                bulk_company_map = {}
             else:
                 bulk_company_options = df_with_email.apply(
                     lambda r: f"{r['company']} ({r.get('email','')})", axis=1
                 ).tolist()
                 bulk_company_map = dict(zip(bulk_company_options, df_with_email.to_dict("records")))
 
+            # все нижче працює і коли в базі нічого нема — щоб ручні отримувачі теж відправлялися
+            if True:
+
                 bs1, bs2 = st.columns([3, 1])
                 with bs1:
                     selected_bulk = st.multiselect(
-                        f"📋 Виберіть компанії (доступно {len(bulk_company_options)} з email)",
+                        f"📋 Виберіть компанії з бази (доступно {len(bulk_company_options)} з email)",
                         bulk_company_options,
                         key="bulk_select",
                         placeholder="Почни вводити назву..."
@@ -1708,6 +1745,60 @@ with tab6:
                     if st.button("✅ Виділити всі", key="bulk_select_all", use_container_width=True):
                         st.session_state["bulk_select"] = bulk_company_options
                         st.rerun()
+
+                # ── ДОДАТИ ВРУЧНУ (якщо компанії немає в базі) ──────────────
+                with st.expander("➕ Додати вручну (компанії немає в базі)", expanded=False):
+                    st.caption("Введи email — лист піде туди. Якщо хочеш додати кілька — натисни кнопку кілька разів.")
+                    mc1, mc2, mc3, mc4 = st.columns([2, 2, 2, 1])
+                    with mc1:
+                        manual_company = st.text_input("Назва компанії", key="manual_company", placeholder="Acme Wool Ltd")
+                    with mc2:
+                        manual_email = st.text_input("Email *", key="manual_email", placeholder="sales@acme.com")
+                    with mc3:
+                        manual_contact = st.text_input("Contact person (опц.)", key="manual_contact", placeholder="Jane Doe")
+                    with mc4:
+                        st.write("")
+                        add_manual_btn = st.button("➕ Додати", key="add_manual_btn", use_container_width=True,
+                                                    disabled=not manual_email.strip())
+
+                    if "manual_recipients" not in st.session_state:
+                        st.session_state["manual_recipients"] = []
+
+                    if add_manual_btn and manual_email.strip():
+                        st.session_state["manual_recipients"].append({
+                            "company": manual_company.strip() or manual_email.split("@")[0],
+                            "email": manual_email.strip(),
+                            "contact_person": manual_contact.strip() or "Sales Team",
+                            "products": "merino products",
+                            "certs": "—",
+                            "id": None,  # немає в БД
+                        })
+                        st.success(f"✅ Додано: {manual_email.strip()}")
+                        st.rerun()
+
+                    # показуємо список доданих вручну з можливістю видалити
+                    if st.session_state["manual_recipients"]:
+                        st.markdown("**📋 Додані вручну:**")
+                        for i, mr in enumerate(st.session_state["manual_recipients"]):
+                            mr_c1, mr_c2 = st.columns([5, 1])
+                            with mr_c1:
+                                st.caption(f"• **{mr['company']}** — `{mr['email']}` (contact: {mr['contact_person']})")
+                            with mr_c2:
+                                if st.button("✕", key=f"del_manual_{i}"):
+                                    st.session_state["manual_recipients"].pop(i)
+                                    st.rerun()
+                        if st.button("🗑️ Очистити всі додані вручну", key="clear_manual"):
+                            st.session_state["manual_recipients"] = []
+                            st.rerun()
+
+                # ── об'єднуємо обраних з бази + доданих вручну в один список ──
+                manual_recipients = st.session_state.get("manual_recipients", [])
+                # додаємо вручну-доданих в bulk_company_map і selected_bulk
+                for mr in manual_recipients:
+                    opt_key = f"📝 {mr['company']} ({mr['email']})"
+                    bulk_company_map[opt_key] = mr
+                    if opt_key not in selected_bulk:
+                        selected_bulk = list(selected_bulk) + [opt_key]
 
                 if selected_bulk:
                     st.caption(f"Обрано: **{len(selected_bulk)}** компаній")
@@ -2167,6 +2258,40 @@ with tab7:
 4. Скопируй 16-значный пароль → вставь в **SMTP password** выше
 5. В **SMTP host** используй `smtp.gmail.com`, порт `587`
     """)
+
+    st.divider()
+    # ── PRODUCTS LIST EDITOR ────────────────────────────────────────────────
+    st.markdown("##### 🏷️ Список продуктів (для колонки **Products** у таблиці)")
+    st.caption(
+        "Це випадаючий список (як у Status). Додай свої типи — наприклад "
+        "`одеяла / blankets`, `шарфы`, `детская одежда`. Один пункт на рядок."
+    )
+    _current_products = get_products_list()
+    products_text = st.text_area(
+        "Один продукт на рядок",
+        value="\n".join(_current_products),
+        height=240,
+        key="products_list_editor",
+        help="Видали порожні рядки — буде менше сміття в дропдауні."
+    )
+
+    pc1, pc2 = st.columns([1, 4])
+    with pc1:
+        if st.button("💾 Зберегти список", type="primary", key="save_products_btn", use_container_width=True):
+            new_list = [line.strip() for line in products_text.splitlines() if line.strip()]
+            # видаляємо дублі зберігаючи порядок
+            seen = set()
+            new_list = [x for x in new_list if not (x in seen or seen.add(x))]
+            save_products_list(new_list)
+            st.session_state["db_rev"] = st.session_state.get("db_rev", 0) + 1
+            st.success(f"✅ Збережено {len(new_list)} продуктів. Дропдаун у таблиці оновиться.")
+            st.rerun()
+    with pc2:
+        if st.button("↺ Відновити дефолтні", key="reset_products_btn"):
+            save_products_list([])  # порожній → читаємо з PRODUCTS константи
+            st.session_state["db_rev"] = st.session_state.get("db_rev", 0) + 1
+            st.success("✅ Дефолтний список відновлено.")
+            st.rerun()
 
 with tab3:
     try:
