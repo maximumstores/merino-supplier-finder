@@ -987,7 +987,10 @@ if st.session_state.log:
             st.markdown(line)
 
 # ── RESULTS — tabs: session / database / charts ───────────────────────────────
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["🔍 Session results", "🗄️ Database (all)", "📊 Charts", "🗄️ Archive", "📥 Import", "✉️ Outreach"])
+tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+    "🔍 Session results", "🗄️ Database (all)", "📊 Charts", "🗄️ Archive",
+    "📥 Import", "✉️ Outreach", "⚙️ Settings"
+])
 
 def render_table(df: pd.DataFrame, allow_edit: bool = False):
     """Render filtered supplier table."""
@@ -1669,6 +1672,190 @@ with tab6:
                     with sb2:
                         st.caption("SMTP_HOST / SMTP_PORT / SMTP_USER / SMTP_PASS / SMTP_FROM → Streamlit Secrets")
 
+            # ─────────────────────────────────────────────────────────────────
+            # ── BULK SEND (массова розсилка) ─────────────────────────────────
+            # ─────────────────────────────────────────────────────────────────
+            st.divider()
+            st.markdown("### 📨 Bulk send — масова розсилка")
+            st.caption("Виберіть кілька компаній → один шаблон → розсилка всім за раз. Всі отримають персоналізований лист (AI підставляє Company, Products, Contact).")
+
+            # відфільтровуємо лише з email
+            _has_email = df_out_f["email"].fillna("").str.strip().str.len() > 0
+            df_with_email = df_out_f[_has_email].copy()
+            if df_with_email.empty:
+                st.warning("⚠️ В поточному фільтрі немає компаній з email. Уточни фільтри вище.")
+            else:
+                bulk_company_options = df_with_email.apply(
+                    lambda r: f"{r['company']} ({r.get('email','')})", axis=1
+                ).tolist()
+                bulk_company_map = dict(zip(bulk_company_options, df_with_email.to_dict("records")))
+
+                bs1, bs2 = st.columns([3, 1])
+                with bs1:
+                    selected_bulk = st.multiselect(
+                        f"📋 Виберіть компанії (доступно {len(bulk_company_options)} з email)",
+                        bulk_company_options,
+                        key="bulk_select",
+                        placeholder="Почни вводити назву..."
+                    )
+                with bs2:
+                    st.write("")
+                    if st.button("✅ Виділити всі", key="bulk_select_all", use_container_width=True):
+                        st.session_state["bulk_select"] = bulk_company_options
+                        st.rerun()
+
+                if selected_bulk:
+                    st.caption(f"Обрано: **{len(selected_bulk)}** компаній")
+
+                    bulk_lang_col, bulk_focus_col = st.columns([1, 2])
+                    with bulk_lang_col:
+                        bulk_lang = st.selectbox("Мова", ["English", "Chinese (中文)"], key="bulk_lang")
+                    with bulk_focus_col:
+                        bulk_focus = st.text_input(
+                            "Фокус на продукт (опц.)",
+                            placeholder="baby sleeping bag, 500 pcs / merino socks, 2000 pairs",
+                            key="bulk_focus"
+                        )
+
+                    bulk_template = st.text_area(
+                        "📝 Шаблон листа (плейсхолдери: {company}, {products}, {certs}, {contact})",
+                        value=st.session_state.get("bulk_template", (
+                            "Subject: Partnership inquiry — merino.tech × {company}\n\n"
+                            "Hi {contact},\n\n"
+                            "I'm reaching out from merino.tech — premium merino wool clothing brand "
+                            "(Amazon FBA, US/EU markets). We saw your products: {products} "
+                            "— and certifications: {certs}.\n\n"
+                            "We're looking for OEM/ODM suppliers for our 2026 line. "
+                            "Could you share:\n"
+                            "  1. Your MOQ for custom orders\n"
+                            "  2. Sample availability and lead time\n"
+                            "  3. Pricing for 500/1000/3000 unit batches\n\n"
+                            "If easier — let's hop on a 15-min call.\n\n"
+                            "Best,\nm.belyakova\nmerino.tech sourcing team"
+                        )),
+                        height=300, key="bulk_template",
+                        help="Залиш як є для дефолтного шаблона. Або відредагуй під свою задачу."
+                    )
+
+                    bg1, bg2 = st.columns([1, 4])
+                    with bg1:
+                        gen_preview_btn = st.button(
+                            "👁️ Preview (1-й)",
+                            key="bulk_preview_btn",
+                            use_container_width=True,
+                            help="Показати як виглядатиме лист для першої компанії"
+                        )
+                    with bg2:
+                        bulk_send_btn = st.button(
+                            f"📨 Розіслати всім ({len(selected_bulk)})",
+                            type="primary",
+                            key="bulk_send_btn",
+                            use_container_width=True,
+                            disabled=not bulk_template.strip()
+                        )
+
+                    # ── PREVIEW ──
+                    if gen_preview_btn and selected_bulk:
+                        prev_co = bulk_company_map[selected_bulk[0]]
+                        prev_text = bulk_template.format(
+                            company=prev_co.get("company", ""),
+                            products=prev_co.get("products", "merino products") or "merino products",
+                            certs=prev_co.get("certs", "") or "—",
+                            contact=prev_co.get("contact_person", "Sales Team") or "Sales Team",
+                        )
+                        st.code(prev_text, language="text")
+                        st.caption(f"↑ Так піде до **{prev_co.get('company','')}** ({prev_co.get('email','')})")
+
+                    # ── BULK SEND ──
+                    if bulk_send_btn:
+                        smtp_cfg = get_smtp_config()
+                        smtp_from = st.secrets.get("SMTP_FROM", smtp_cfg["from"])
+                        smtp_user = st.secrets.get("SMTP_USER", smtp_cfg["user"])
+                        smtp_pass = st.secrets.get("SMTP_PASS", smtp_cfg["passw"])
+                        smtp_host = st.secrets.get("SMTP_HOST", smtp_cfg["host"])
+                        smtp_port = int(st.secrets.get("SMTP_PORT", smtp_cfg["port"]))
+
+                        if not (smtp_from and smtp_user and smtp_pass):
+                            st.error("❌ SMTP не налаштовано. Заповни Settings → SMTP або додай у Streamlit Secrets.")
+                        else:
+                            import smtplib, time
+                            from email.mime.text import MIMEText
+                            from email.mime.multipart import MIMEMultipart
+
+                            progress = st.progress(0, text="Підключаємось до SMTP...")
+                            log_box = st.empty()
+                            sent, failed = 0, 0
+                            errors = []
+
+                            try:
+                                srv = smtplib.SMTP(smtp_host, smtp_port, timeout=30)
+                                srv.starttls()
+                                srv.login(smtp_user, smtp_pass)
+
+                                for i, opt in enumerate(selected_bulk):
+                                    co = bulk_company_map[opt]
+                                    co_email = co.get("email", "").strip()
+                                    co_company = co.get("company", "")
+
+                                    progress.progress(
+                                        (i + 1) / len(selected_bulk),
+                                        text=f"[{i+1}/{len(selected_bulk)}] 📤 {co_company}..."
+                                    )
+
+                                    try:
+                                        # підставляємо плейсхолдери
+                                        body_full = bulk_template.format(
+                                            company=co_company,
+                                            products=co.get("products", "merino products") or "merino products",
+                                            certs=co.get("certs", "") or "—",
+                                            contact=co.get("contact_person", "Sales Team") or "Sales Team",
+                                        )
+                                        # розрізаємо subject + body
+                                        subj_match = re.search(r"^Subject[:\s]+(.+?)(?:\n|$)", body_full, re.IGNORECASE | re.MULTILINE)
+                                        if subj_match:
+                                            subj = subj_match.group(1).strip()
+                                            body = re.sub(r"^Subject[:\s]+.+?\n", "", body_full, count=1, flags=re.IGNORECASE | re.MULTILINE).strip()
+                                        else:
+                                            subj = f"Partnership inquiry — merino.tech × {co_company}"
+                                            body = body_full
+
+                                        msg = MIMEMultipart()
+                                        msg["From"] = smtp_from
+                                        msg["To"] = co_email
+                                        msg["Subject"] = subj
+                                        msg.attach(MIMEText(body, "plain", "utf-8"))
+                                        srv.sendmail(smtp_from, [co_email], msg.as_string())
+
+                                        # update status
+                                        if "id" in co and not pd.isna(co.get("id")):
+                                            with get_db() as conn:
+                                                with conn.cursor() as cur:
+                                                    cur.execute(
+                                                        "UPDATE merino_suppliers SET status='Contacted' WHERE id=%s",
+                                                        (int(co["id"]),)
+                                                    )
+                                                conn.commit()
+                                        sent += 1
+                                        log_box.caption(f"✅ {sent} надіслано · ❌ {failed} помилок")
+                                        # пауза щоб не банили SMTP
+                                        time.sleep(1.0)
+                                    except Exception as send_err:
+                                        failed += 1
+                                        errors.append(f"{co_company}: {send_err}")
+                                        log_box.caption(f"✅ {sent} надіслано · ❌ {failed} помилок · last: {co_company}")
+                                srv.quit()
+                            except Exception as e:
+                                st.error(f"❌ SMTP помилка: {e}")
+
+                            progress.progress(1.0, text="Готово!")
+                            st.session_state["db_rev"] = st.session_state.get("db_rev", 0) + 1
+                            if sent:
+                                st.success(f"✅ Розіслано **{sent}/{len(selected_bulk)}** листів. Статус → Contacted.")
+                            if errors:
+                                with st.expander(f"❌ Помилки ({len(errors)})"):
+                                    for err in errors[:30]:
+                                        st.code(err)
+
     except Exception as e:
         st.error(f"Outreach error: {e}")
 
@@ -1884,8 +2071,8 @@ Return ONLY a valid JSON array starting with ["""
                 st.success(f"✅ Imported **{len(full_rows)}** suppliers to Database!")
                 st.rerun()
 
-with tab6:
-    st.markdown("**✉️ Outreach Settings**")
+with tab7:
+    st.markdown("**⚙️ Outreach Settings**")
     st.caption("SMTP настройки для отправки писем поставщикам")
 
     smtp = get_smtp_config()
