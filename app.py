@@ -1259,6 +1259,38 @@ with tab2:
                     scols[i].metric(f"{STATUS_EMOJI[s]} {s}", cnt)
                 st.divider()
 
+            # ── QUICK ADD PRODUCT (швидке поповнення дропдауна Products) ──
+            with st.expander("🏷️ Додати свій продукт у дропдаун Products", expanded=False):
+                qa1, qa2, qa3 = st.columns([3, 1, 4])
+                with qa1:
+                    new_product_name = st.text_input(
+                        "Назва нового продукту",
+                        key="quick_add_product_name",
+                        placeholder="наприклад: одеяла / blankets, шарфи, дитяча одежа..."
+                    )
+                with qa2:
+                    st.write("")
+                    if st.button("➕ Додати", key="quick_add_product_btn",
+                                 use_container_width=True,
+                                 disabled=not new_product_name.strip()):
+                        existing = get_products_list()
+                        new_val = new_product_name.strip()
+                        if new_val in existing:
+                            st.warning(f"⚠️ '{new_val}' вже є в списку.")
+                        else:
+                            existing.append(new_val)
+                            save_products_list(existing)
+                            st.session_state["db_rev"] = st.session_state.get("db_rev", 0) + 1
+                            st.success(f"✅ '{new_val}' додано в дропдаун.")
+                            # очищаємо інпут
+                            st.session_state.pop("quick_add_product_name", None)
+                            st.rerun()
+                with qa3:
+                    st.caption(
+                        f"Зараз у списку **{len(get_products_list())}** продуктів. "
+                        f"Повний редактор — у вкладці ⚙️ Settings."
+                    )
+
             render_table(df_db, allow_edit=True)
 
             st.divider()
