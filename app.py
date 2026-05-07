@@ -340,6 +340,136 @@ def mark_replied(supplier_id: int, reply_subject: str = "", reply_from: str = ""
     except Exception as e:
         log_activity("got_reply_error", f"id={supplier_id}", str(e)[:200])
 
+def fetch_inbox_messages(days_back: int = 14, max_messages: int = 50) -> list:
+    """Завантажує тіло останніх N листів з inbox. Повертає список dict з полями:
+    msg_id, from_addr, from_name, subject, date, body_text, matched_supplier_id, matched_company.
+    Зіставляє відправника з email-ами постачальників — якщо матч, відмічає."""
+    import imaplib
+    import email as email_module
+    from email.utils import parseaddr, parsedate_to_datetime
+    from datetime import timedelta
+
+    cfg = get_imap_config()
+    if not (cfg["user"] and cfg["passw"] and cfg["host"]):
+        return [{"error": "IMAP не налаштовано"}]
+
+    # email → (id, company) для зіставлення
+    try:
+        with get_db() as conn:
+            df_all = pd.read_sql(
+                "SELECT id, company, email, status FROM merino_suppliers WHERE email IS NOT NULL AND email != ''",
+                conn,
+            )
+        email_to_supp = {}
+        for _, r in df_all.iterrows():
+            em = str(r["email"]).strip().lower()
+            if em:
+                email_to_supp[em] = (int(r["id"]), str(r["company"]), str(r.get("status","")))
+    except Exception:
+        email_to_supp = {}
+
+    messages = []
+    try:
+        M = imaplib.IMAP4_SSL(cfg["host"], cfg["port"])
+        M.login(cfg["user"], cfg["passw"])
+        M.select("INBOX")
+
+        since_date = (datetime.now() - timedelta(days=days_back)).strftime("%d-%b-%Y")
+        typ, data = M.search(None, f'(SINCE "{since_date}")')
+        if typ != "OK":
+            return [{"error": f"IMAP search failed: {typ}"}]
+
+        msg_ids = data[0].split()[-max_messages:]
+        msg_ids = list(reversed(msg_ids))  # найновіші зверху
+
+        for msg_id in msg_ids:
+            try:
+                typ, msg_data = M.fetch(msg_id, "(RFC822)")
+                if typ != "OK" or not msg_data or not msg_data[0]:
+                    continue
+                raw_full = msg_data[0][1]
+                msg = email_module.message_from_bytes(raw_full)
+
+                from_raw = msg.get("From", "")
+                subject = msg.get("Subject", "(no subject)")
+                date_raw = msg.get("Date", "")
+                from_name, from_addr = parseaddr(from_raw)
+                from_addr = from_addr.lower().strip()
+
+                # декодуємо subject (може бути MIME-encoded)
+                try:
+                    from email.header import decode_header
+                    parts_decoded = decode_header(subject)
+                    subject = " ".join(
+                        (s.decode(enc or "utf-8", errors="ignore") if isinstance(s, bytes) else s)
+                        for s, enc in parts_decoded
+                    )
+                except Exception:
+                    pass
+
+                # дата
+                try:
+                    dt = parsedate_to_datetime(date_raw)
+                    date_str = dt.strftime("%Y-%m-%d %H:%M")
+                except Exception:
+                    date_str = date_raw[:25]
+
+                # тіло — шукаємо text/plain
+                body_text = ""
+                if msg.is_multipart():
+                    for part in msg.walk():
+                        ctype = part.get_content_type()
+                        cdisp = str(part.get("Content-Disposition", ""))
+                        if ctype == "text/plain" and "attachment" not in cdisp:
+                            try:
+                                charset = part.get_content_charset() or "utf-8"
+                                body_text = part.get_payload(decode=True).decode(charset, errors="ignore")
+                                break
+                            except Exception:
+                                continue
+                    if not body_text:
+                        # fallback на html → strip tags
+                        for part in msg.walk():
+                            if part.get_content_type() == "text/html":
+                                try:
+                                    charset = part.get_content_charset() or "utf-8"
+                                    html = part.get_payload(decode=True).decode(charset, errors="ignore")
+                                    body_text = re.sub(r"<[^>]+>", "", html)
+                                    body_text = re.sub(r"\s+", " ", body_text).strip()
+                                    break
+                                except Exception:
+                                    continue
+                else:
+                    try:
+                        charset = msg.get_content_charset() or "utf-8"
+                        body_text = msg.get_payload(decode=True).decode(charset, errors="ignore")
+                    except Exception:
+                        body_text = ""
+
+                body_text = body_text[:3000]  # обмежуємо
+
+                matched = email_to_supp.get(from_addr)
+                messages.append({
+                    "msg_id": msg_id.decode() if isinstance(msg_id, bytes) else str(msg_id),
+                    "from_name": from_name or from_addr,
+                    "from_addr": from_addr,
+                    "subject": subject,
+                    "date": date_str,
+                    "body": body_text,
+                    "matched_supplier_id": matched[0] if matched else None,
+                    "matched_company": matched[1] if matched else None,
+                    "matched_status": matched[2] if matched else None,
+                })
+            except Exception:
+                continue
+
+        M.close()
+        M.logout()
+    except Exception as e:
+        return [{"error": f"IMAP error: {e}"}]
+
+    return messages
+
 def fetch_imap_replies(days_back: int = 30, max_messages: int = 200) -> dict:
     """Сканує inbox через IMAP, шукає листи від email-ів постачальників.
     Повертає: {emails_checked, replies_found, marked_replied, errors}."""
@@ -1927,6 +2057,139 @@ with tab6:
 
     except Exception:
         pass  # таблиця/колонки можуть бути відсутні до міграції
+
+    # ── INBOX VIEWER ────────────────────────────────────────────────────────
+    with st.expander("📬 Вхідна пошта (Inbox) — читати листи прямо тут", expanded=False):
+        st.caption(
+            "Підключається до твого IMAP (з Settings) і показує останні листи. "
+            "Якщо лист від постачальника з нашої БД — буде позначено 🟢, можна одразу натиснути "
+            "**📥 Got reply** прямо тут."
+        )
+        ix1, ix2, ix3 = st.columns([1, 1, 1])
+        with ix1:
+            inbox_days = st.number_input("Останні (днів)", min_value=1, max_value=90, value=14, step=7, key="inbox_days")
+        with ix2:
+            inbox_max = st.number_input("Макс листів", min_value=10, max_value=200, value=50, step=10, key="inbox_max")
+        with ix3:
+            st.write("")
+            load_inbox_btn = st.button("📥 Завантажити inbox", key="load_inbox_btn",
+                                        type="primary", use_container_width=True)
+
+        # фільтр для списку
+        ix_f1, ix_f2 = st.columns([2, 2])
+        with ix_f1:
+            inbox_filter_supplier = st.checkbox(
+                "Тільки від постачальників з нашої БД", value=True, key="inbox_filter_supplier"
+            )
+        with ix_f2:
+            inbox_search = st.text_input(
+                "🔍 Шукати по темі / тексту / відправнику",
+                key="inbox_search",
+                placeholder="наприклад: MOQ, sample, price..."
+            )
+
+        if load_inbox_btn:
+            with st.spinner("Завантажуємо листи..."):
+                msgs = fetch_inbox_messages(days_back=int(inbox_days), max_messages=int(inbox_max))
+            st.session_state["_inbox_msgs"] = msgs
+
+        msgs = st.session_state.get("_inbox_msgs", [])
+        if msgs and isinstance(msgs[0], dict) and msgs[0].get("error"):
+            st.error(f"❌ {msgs[0]['error']}")
+        elif msgs:
+            # фільтруємо
+            filtered = msgs
+            if inbox_filter_supplier:
+                filtered = [m for m in filtered if m.get("matched_supplier_id")]
+            if inbox_search:
+                q = inbox_search.lower()
+                filtered = [
+                    m for m in filtered
+                    if q in (m.get("subject","") + " " + m.get("body","") + " " +
+                             m.get("from_addr","") + " " + (m.get("matched_company") or "")).lower()
+                ]
+
+            st.caption(
+                f"Показано **{len(filtered)}** з {len(msgs)} листів · "
+                f"від постачальників: **{sum(1 for m in msgs if m.get('matched_supplier_id'))}**"
+            )
+
+            for i, m in enumerate(filtered[:30]):
+                matched_co = m.get("matched_company")
+                matched_id = m.get("matched_supplier_id")
+                matched_status = m.get("matched_status", "")
+
+                if matched_co:
+                    label = f"🟢 **{matched_co}** ({m['from_addr']}) · {m['date']} · {m['subject'][:60]}"
+                else:
+                    label = f"⚪ {m['from_name']} ({m['from_addr']}) · {m['date']} · {m['subject'][:60]}"
+
+                with st.expander(label, expanded=False):
+                    if matched_co:
+                        st.success(
+                            f"✅ Цей лист від постачальника **{matched_co}** "
+                            f"(поточний статус: {matched_status or 'New'})"
+                        )
+
+                    # тіло
+                    st.text_area(
+                        "Тіло листа",
+                        value=m.get("body", "(empty)"),
+                        height=240,
+                        key=f"inbox_body_{i}",
+                        disabled=True,
+                    )
+
+                    # дії
+                    if matched_id:
+                        ax1, ax2, ax3 = st.columns([1, 1, 3])
+                        with ax1:
+                            if matched_status != "Replied" and st.button(
+                                "📥 Got reply",
+                                key=f"inbox_reply_{i}",
+                                use_container_width=True,
+                                type="primary",
+                            ):
+                                mark_replied(int(matched_id), m.get("subject",""), m.get("from_addr",""))
+                                st.session_state["db_rev"] = st.session_state.get("db_rev", 0) + 1
+                                st.success(f"✅ {matched_co} → Replied")
+                                st.rerun()
+                        with ax2:
+                            if st.button(
+                                "📝 Зберегти у Notes",
+                                key=f"inbox_note_{i}",
+                                use_container_width=True,
+                            ):
+                                # додаємо тіло до notes
+                                note_text = f"[{m['date']}] FROM {m['from_addr']}\n{m['subject']}\n{m.get('body','')[:1000]}\n---\n"
+                                try:
+                                    with get_db() as conn:
+                                        with conn.cursor() as cur:
+                                            cur.execute(
+                                                "UPDATE merino_suppliers SET notes = COALESCE(notes,'') || %s WHERE id=%s",
+                                                (note_text, int(matched_id))
+                                            )
+                                        conn.commit()
+                                    st.session_state["db_rev"] = st.session_state.get("db_rev", 0) + 1
+                                    st.toast(f"💾 Збережено в notes для {matched_co}")
+                                except Exception as e:
+                                    st.error(f"Save failed: {e}")
+                        with ax3:
+                            st.caption(
+                                "💡 'Got reply' — позначить статус Replied. "
+                                "'Зберегти у Notes' — додасть тіло листа в нотатки постачальника."
+                            )
+                    else:
+                        st.caption(
+                            "⚪ Цей email не знайдено в БД постачальників. "
+                            "Якщо це новий потенційний контакт — додай його через "
+                            "вкладку Import або Outreach → Bulk send → 'Додати вручну'."
+                        )
+
+            if len(filtered) > 30:
+                st.caption(f"... ще {len(filtered)-30} листів. Уточни фільтр щоб побачити менше.")
+        else:
+            st.info("Натисни **📥 Завантажити inbox** щоб побачити листи. Налаштуй IMAP у Settings якщо ще не зробила.")
 
     st.divider()
 
