@@ -232,6 +232,81 @@ def save_products_list(items: list) -> None:
     """Зберегти кастомний список продуктів."""
     set_setting("products_list", json.dumps([str(x).strip() for x in items if str(x).strip()]))
 
+# ── EMAIL TEMPLATES ────────────────────────────────────────────────────────
+_DEFAULT_TEMPLATES = {
+    "intro": (
+        "Subject: Partnership inquiry — merino.tech × {company}\n\n"
+        "Hi {contact},\n\n"
+        "I'm reaching out from merino.tech — premium merino wool clothing brand "
+        "(Amazon FBA, US/EU markets). We saw your products: {products} "
+        "— and certifications: {certs}.\n\n"
+        "We're looking for OEM/ODM suppliers for our 2026 line. "
+        "Could you share:\n"
+        "  1. Your MOQ for custom orders\n"
+        "  2. Sample availability and lead time\n"
+        "  3. Pricing for 500/1000/3000 unit batches\n\n"
+        "If easier — let's hop on a 15-min call.\n\n"
+        "Best,\nm.belyakova\nmerino.tech sourcing team"
+    ),
+    "follow-up": (
+        "Subject: Following up — merino.tech × {company}\n\n"
+        "Hi {contact},\n\n"
+        "I sent you a message a week ago about our 2026 sourcing — wanted to bump it back to the top.\n\n"
+        "Even a one-line reply is great: 'busy until next month' / 'need more info' / "
+        "'forwarded to colleague'. Then I know how to follow up.\n\n"
+        "Best,\nm.belyakova\nmerino.tech"
+    ),
+    "sample request": (
+        "Subject: Sample request — merino.tech × {company}\n\n"
+        "Hi {contact},\n\n"
+        "Thanks for the response! We'd like to order samples of {products} for testing.\n\n"
+        "Please confirm:\n"
+        "  • Sample cost (with shipping to US)\n"
+        "  • Lead time for samples\n"
+        "  • Available colors / sizes\n"
+        "  • Payment method (PayPal / wire / WeChat Pay)\n\n"
+        "Ship to: [WILL_PROVIDE_AFTER_CONFIRMATION]\n\n"
+        "Best,\nm.belyakova\nmerino.tech sourcing"
+    ),
+    "pricing inquiry": (
+        "Subject: Pricing & quote — {company}\n\n"
+        "Hi {contact},\n\n"
+        "Could you send a formal quote for the following:\n\n"
+        "  Product: {products}\n"
+        "  Quantities: 500 / 1000 / 3000 units\n"
+        "  Specs: 100% merino wool, Woolmark certified preferred\n"
+        "  Custom labeling: Yes (will provide artwork)\n"
+        "  Incoterms: FOB or EXW\n\n"
+        "Also share lead time and payment terms.\n\n"
+        "Looking forward,\nm.belyakova\nmerino.tech"
+    ),
+    "catalog request": (
+        "Subject: Catalog request — {company}\n\n"
+        "Hi {contact},\n\n"
+        "Could you share:\n"
+        "  • Your full catalog / product line PDF\n"
+        "  • Latest collection photos\n"
+        "  • Reference customers (if NDA permits)\n\n"
+        "We need to evaluate fit before we discuss volumes.\n\n"
+        "Thanks,\nm.belyakova\nmerino.tech"
+    ),
+}
+
+def get_email_templates() -> dict:
+    """Завантажити шаблони з БД, або дефолтні якщо немає."""
+    raw = get_setting("email_templates", "")
+    if raw:
+        try:
+            data = json.loads(raw)
+            if isinstance(data, dict):
+                return data
+        except Exception:
+            pass
+    return dict(_DEFAULT_TEMPLATES)
+
+def save_email_templates(templates: dict) -> None:
+    set_setting("email_templates", json.dumps(templates))
+
 def get_smtp_config() -> dict:
     return {
         "host":  get_setting("smtp_host",  "smtp.gmail.com"),
@@ -399,12 +474,41 @@ try:
                 "ALTER TABLE merino_suppliers ADD COLUMN IF NOT EXISTS notes TEXT DEFAULT ''",
                 "ALTER TABLE merino_suppliers ADD COLUMN IF NOT EXISTS wechat TEXT DEFAULT ''",
                 "ALTER TABLE merino_suppliers ADD COLUMN IF NOT EXISTS quotes TEXT DEFAULT ''",
+                # нові поля для pricing tracker / sample workflow / follow-up
+                "ALTER TABLE merino_suppliers ADD COLUMN IF NOT EXISTS price_per_unit TEXT DEFAULT ''",
+                "ALTER TABLE merino_suppliers ADD COLUMN IF NOT EXISTS lead_time_days TEXT DEFAULT ''",
+                "ALTER TABLE merino_suppliers ADD COLUMN IF NOT EXISTS sample_cost TEXT DEFAULT ''",
+                "ALTER TABLE merino_suppliers ADD COLUMN IF NOT EXISTS sample_status TEXT DEFAULT ''",
+                "ALTER TABLE merino_suppliers ADD COLUMN IF NOT EXISTS last_contacted_at TIMESTAMP",
+                "ALTER TABLE merino_suppliers ADD COLUMN IF NOT EXISTS replied_at TIMESTAMP",
+                "ALTER TABLE merino_suppliers ADD COLUMN IF NOT EXISTS attachments TEXT DEFAULT ''",
                 "CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT)",
+                # activity log
+                """CREATE TABLE IF NOT EXISTS activity_log (
+                    id SERIAL PRIMARY KEY,
+                    ts TIMESTAMP DEFAULT NOW(),
+                    action TEXT,
+                    target TEXT,
+                    details TEXT
+                )""",
             ]:
                 _cur.execute(_sql)
         _conn.commit()
 except Exception as _e:
     pass  # table may not exist yet
+
+def log_activity(action: str, target: str = "", details: str = "") -> None:
+    """Запис у activity_log — для аудиту."""
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO activity_log (action, target, details) VALUES (%s, %s, %s)",
+                    (action[:50], target[:200], details[:500])
+                )
+            conn.commit()
+    except Exception:
+        pass
 
 # ── SESSION STATE ────────────────────────────────────────────────────────────
 if "results" not in st.session_state:
@@ -928,11 +1032,21 @@ try:
     _db_no_c   = _db_total - _db_with_c
     _db_high   = int((_df_stat["priority"].fillna("") == "HIGH").sum()) if _db_total else 0
     _db_pct    = f"{round(_db_with_c/_db_total*100)}%" if _db_total else "—"
+    # outreach funnel: Contacted+ → Replied → Deal
+    if "status" in _df_stat.columns and _db_total:
+        _statuses = _df_stat["status"].fillna("New")
+        _contacted = int((_statuses.isin(["Contacted","Replied","Negotiating","Deal"])).sum())
+        _replied   = int((_statuses.isin(["Replied","Negotiating","Deal"])).sum())
+        _reply_rate = f"{round(_replied/_contacted*100)}%" if _contacted > 0 else "—"
+    else:
+        _contacted, _replied, _reply_rate = 0, 0, "—"
 except Exception:
     _db_total = _db_with_c = _db_no_c = _db_high = 0
     _db_pct = "—"
+    _contacted = _replied = 0
+    _reply_rate = "—"
 
-m1, m2, m3, m4, m5, m6 = st.columns(6)
+m1, m2, m3, m4, m5, m6, m7 = st.columns(7)
 with m1:
     st.metric("🗄️ DB total", _db_total)
 with m2:
@@ -942,8 +1056,10 @@ with m3:
 with m4:
     st.metric("⭐ HIGH", _db_high)
 with m5:
-    st.metric("🔍 Session", _total, delta=f"+{_total}" if _total else None)
+    st.metric("📤 Contacted", _contacted)
 with m6:
+    st.metric("📥 Reply rate", _reply_rate, delta=f"{_replied} replied" if _replied else None, delta_color="off")
+with m7:
     db_refresh = st.button("🔄 Refresh", use_container_width=True)
 
 if db_refresh:
@@ -1104,21 +1220,49 @@ def render_table(df: pd.DataFrame, allow_edit: bool = False):
         df_f["_sort"] = df_f["⭐"].str.extract(r"(\d+)").astype(float).fillna(0)
         df_f = df_f.sort_values("_sort", ascending=False).drop(columns=["_sort"])
 
-    # ── DELETE selected ──
+    # ── DELETE selected + BULK actions ──
     if allow_edit and "id" in df_f.columns:
         with ec_gap:
-            del_company = st.selectbox("🗑️ Delete company", ["—"] + df_f["company"].dropna().tolist(),
-                                       key=f"del_{allow_edit}", label_visibility="collapsed")
-            if del_company != "—":
-                if st.button(f"🗑️ Delete: {del_company[:30]}", key=f"delbtn_{allow_edit}", type="secondary"):
-                    row_id = df_f[df_f["company"] == del_company]["id"].iloc[0]
-                    with get_db() as conn:
-                        with conn.cursor() as cur:
-                            cur.execute("DELETE FROM merino_suppliers WHERE id=%s", (int(row_id),))
-                        conn.commit()
-                    st.session_state["db_rev"] = st.session_state.get("db_rev", 0) + 1
-                    st.toast(f"Deleted: {del_company}")
-                    st.rerun()
+            bulk_co_options = df_f["company"].dropna().tolist()
+            bulk_co_selected = st.multiselect(
+                "🗂️ Bulk select (для архіву / видалення)",
+                bulk_co_options,
+                key=f"bulk_actions_{allow_edit}",
+                label_visibility="collapsed",
+                placeholder="Виберіть компанії для масового архіву / видалення..."
+            )
+            if bulk_co_selected:
+                ba1, ba2, _ = st.columns([1, 1, 3])
+                with ba1:
+                    if st.button(f"🗄️ Archive ({len(bulk_co_selected)})",
+                                 key=f"bulk_arch_{allow_edit}",
+                                 use_container_width=True):
+                        ids = df_f[df_f["company"].isin(bulk_co_selected)]["id"].tolist()
+                        with get_db() as conn:
+                            with conn.cursor() as cur:
+                                for rid in ids:
+                                    cur.execute("UPDATE merino_suppliers SET status='🗄️ Archived' WHERE id=%s",
+                                                (int(rid),))
+                            conn.commit()
+                        log_activity("bulk_archive", f"{len(ids)} suppliers", ", ".join(bulk_co_selected[:5]))
+                        st.session_state["db_rev"] = st.session_state.get("db_rev", 0) + 1
+                        st.toast(f"🗄️ Архівовано {len(ids)} компаній")
+                        st.rerun()
+                with ba2:
+                    if st.button(f"🗑️ Delete ({len(bulk_co_selected)})",
+                                 key=f"bulk_del_{allow_edit}",
+                                 type="secondary",
+                                 use_container_width=True):
+                        ids = df_f[df_f["company"].isin(bulk_co_selected)]["id"].tolist()
+                        with get_db() as conn:
+                            with conn.cursor() as cur:
+                                for rid in ids:
+                                    cur.execute("DELETE FROM merino_suppliers WHERE id=%s", (int(rid),))
+                            conn.commit()
+                        log_activity("bulk_delete", f"{len(ids)} suppliers", ", ".join(bulk_co_selected[:5]))
+                        st.session_state["db_rev"] = st.session_state.get("db_rev", 0) + 1
+                        st.toast(f"🗑️ Видалено {len(ids)} компаній")
+                        st.rerun()
 
     st.caption(f"Showing **{len(df_f)}** of {len(df)} suppliers")
 
@@ -1258,6 +1402,45 @@ with tab2:
                     cnt = status_counts.get(s, 0)
                     scols[i].metric(f"{STATUS_EMOJI[s]} {s}", cnt)
                 st.divider()
+
+            # ── DUPLICATE DETECTION ──
+            with st.expander("🔍 Знайти дублікати (fuzzy match по назві)", expanded=False):
+                st.caption("Шукає компанії з схожими назвами — наприклад 'Nagsun Apparel' vs 'Nagsun Apparel Fiji Pte Ltd'.")
+                if st.button("🔎 Сканувати на дублікати", key="dup_scan_btn"):
+                    # простий fuzzy: нормалізуємо назву (lower, без розділювачів) → шукаємо substring
+                    def _norm(s):
+                        return re.sub(r'[^a-z0-9]', '', str(s or '').lower())
+                    df_db_dup = df_db.copy()
+                    df_db_dup["_norm"] = df_db_dup["company"].fillna("").apply(_norm)
+                    df_db_dup = df_db_dup[df_db_dup["_norm"].str.len() >= 4]
+                    duplicates = []
+                    seen_pairs = set()
+                    norms = df_db_dup["_norm"].tolist()
+                    ids = df_db_dup["id"].tolist()
+                    names = df_db_dup["company"].tolist()
+                    for i in range(len(norms)):
+                        for j in range(i+1, len(norms)):
+                            a, b = norms[i], norms[j]
+                            if not a or not b:
+                                continue
+                            # один є префіксом / substring іншого
+                            if (len(a) >= 6 and len(b) >= 6) and (a in b or b in a) and abs(len(a)-len(b)) <= 30:
+                                key = tuple(sorted([int(ids[i]), int(ids[j])]))
+                                if key not in seen_pairs:
+                                    seen_pairs.add(key)
+                                    duplicates.append({
+                                        "id_a": int(ids[i]),
+                                        "company_a": names[i],
+                                        "id_b": int(ids[j]),
+                                        "company_b": names[j],
+                                    })
+                    if duplicates:
+                        st.warning(f"⚠️ Знайдено {len(duplicates)} потенційних пар дублікатів:")
+                        df_dup = pd.DataFrame(duplicates)
+                        st.dataframe(df_dup, use_container_width=True, hide_index=True, height=300)
+                        st.caption("💡 Перевір вручну → видали зайвий запис через **🗂️ Bulk select** у таблиці нижче.")
+                    else:
+                        st.success("✅ Дублікатів не знайдено.")
 
             # ── QUICK ADD PRODUCT (швидке поповнення дропдауна Products) ──
             with st.expander("🏷️ Додати свій продукт у дропдаун Products", expanded=False):
@@ -1528,7 +1711,7 @@ with tab2:
                                     with get_db() as conn:
                                         with conn.cursor() as cur:
                                             cur.execute(
-                                                "UPDATE merino_suppliers SET status='Contacted' WHERE id=%s",
+                                                "UPDATE merino_suppliers SET status='Contacted', last_contacted_at=NOW() WHERE id=%s",
                                                 (int(row["id"]),)
                                             )
                                         conn.commit()
@@ -1578,6 +1761,62 @@ with tab4:
 
 with tab6:
     st.markdown("**✉️ Outreach — поиск контакта + генерация + отправка**")
+
+    # ── FOLLOW-UP REMINDERS ──────────────────────────────────────────────────
+    try:
+        with get_db() as _conn:
+            _df_followup = pd.read_sql(
+                """SELECT id, company, email, phone, products, contact_person, certs,
+                          last_contacted_at, status
+                   FROM merino_suppliers
+                   WHERE status='Contacted'
+                     AND last_contacted_at IS NOT NULL
+                     AND last_contacted_at < NOW() - INTERVAL '7 days'
+                   ORDER BY last_contacted_at ASC
+                   LIMIT 100""",
+                _conn,
+            )
+        if not _df_followup.empty:
+            st.warning(
+                f"📨 **{len(_df_followup)}** компаній чекають follow-up "
+                f"(контактовано >7 днів тому, відповіді немає)"
+            )
+            with st.expander(f"Показати список ({len(_df_followup)})", expanded=False):
+                _show_fu = ["company","email","last_contacted_at","contact_person"]
+                _show_fu = [c for c in _show_fu if c in _df_followup.columns]
+                st.dataframe(
+                    _df_followup[_show_fu],
+                    use_container_width=True, hide_index=True, height=200,
+                )
+                fu1, fu2 = st.columns([1, 4])
+                with fu1:
+                    if st.button("📨 Підготувати follow-up для всіх",
+                                 key="prep_followup_btn",
+                                 type="primary",
+                                 use_container_width=True):
+                        # додаємо їх у bulk_select як ручні отримувачі для розсилки
+                        templates = get_email_templates()
+                        st.session_state["bulk_template"] = templates.get(
+                            "follow-up", _DEFAULT_TEMPLATES["follow-up"]
+                        )
+                        # сформуємо опції для multiselect
+                        _opts = [
+                            f"{r['company']} ({r['email']})"
+                            for _, r in _df_followup.iterrows()
+                            if r.get("email")
+                        ]
+                        st.session_state["bulk_select"] = _opts
+                        st.success(f"✅ Додано {len(_opts)} компаній у Bulk send нижче з шаблоном 'follow-up'. Прокрути вниз → 📨 Розіслати.")
+                        st.rerun()
+                with fu2:
+                    st.caption(
+                        "Шаблон 'follow-up' завантажиться автоматично. "
+                        "Можна редагувати в Settings → Email templates."
+                    )
+
+    except Exception:
+        pass  # таблиця/колонки можуть бути відсутні до міграції
+
     st.divider()
 
     try:
@@ -1725,7 +1964,7 @@ with tab6:
                                 if "id" in out_row:
                                     with get_db() as conn:
                                         with conn.cursor() as cur:
-                                            cur.execute("UPDATE merino_suppliers SET status='Contacted' WHERE id=%s", (int(out_row["id"]),))
+                                            cur.execute("UPDATE merino_suppliers SET status='Contacted', last_contacted_at=NOW() WHERE id=%s", (int(out_row["id"]),))
                                         conn.commit()
                                     st.session_state["db_rev"] = st.session_state.get("db_rev",0)+1
                                 st.success(f"✅ Отправлено на {out_to} · Статус → Contacted")
@@ -1835,10 +2074,22 @@ with tab6:
                 if selected_bulk:
                     st.caption(f"Обрано: **{len(selected_bulk)}** компаній")
 
-                    bulk_lang_col, bulk_focus_col = st.columns([1, 2])
-                    with bulk_lang_col:
+                    # ── вибір шаблону з бібліотеки ──
+                    _templates = get_email_templates()
+                    tpl_col, lang_col, focus_col = st.columns([1.5, 1, 2])
+                    with tpl_col:
+                        tpl_name = st.selectbox(
+                            "📝 Шаблон",
+                            list(_templates.keys()),
+                            key="bulk_tpl_name",
+                            help="Бібліотека шаблонів. Редагувати — у Settings → Email templates."
+                        )
+                        if st.button("📥 Завантажити цей шаблон", key="load_tpl_btn", use_container_width=True):
+                            st.session_state["bulk_template"] = _templates.get(tpl_name, "")
+                            st.rerun()
+                    with lang_col:
                         bulk_lang = st.selectbox("Мова", ["English", "Chinese (中文)"], key="bulk_lang")
-                    with bulk_focus_col:
+                    with focus_col:
                         bulk_focus = st.text_input(
                             "Фокус на продукт (опц.)",
                             placeholder="baby sleeping bag, 500 pcs / merino socks, 2000 pairs",
@@ -1846,23 +2097,13 @@ with tab6:
                         )
 
                     bulk_template = st.text_area(
-                        "📝 Шаблон листа (плейсхолдери: {company}, {products}, {certs}, {contact})",
-                        value=st.session_state.get("bulk_template", (
-                            "Subject: Partnership inquiry — merino.tech × {company}\n\n"
-                            "Hi {contact},\n\n"
-                            "I'm reaching out from merino.tech — premium merino wool clothing brand "
-                            "(Amazon FBA, US/EU markets). We saw your products: {products} "
-                            "— and certifications: {certs}.\n\n"
-                            "We're looking for OEM/ODM suppliers for our 2026 line. "
-                            "Could you share:\n"
-                            "  1. Your MOQ for custom orders\n"
-                            "  2. Sample availability and lead time\n"
-                            "  3. Pricing for 500/1000/3000 unit batches\n\n"
-                            "If easier — let's hop on a 15-min call.\n\n"
-                            "Best,\nm.belyakova\nmerino.tech sourcing team"
-                        )),
+                        "📝 Текст шаблона (плейсхолдери: {company}, {products}, {certs}, {contact})",
+                        value=st.session_state.get(
+                            "bulk_template",
+                            _templates.get(tpl_name, _DEFAULT_TEMPLATES["intro"])
+                        ),
                         height=300, key="bulk_template",
-                        help="Залиш як є для дефолтного шаблона. Або відредагуй під свою задачу."
+                        help="Можна редагувати тут — або зберегти як новий шаблон у Settings."
                     )
 
                     bg1, bg2 = st.columns([1, 4])
@@ -1964,7 +2205,7 @@ with tab6:
                                             with get_db() as conn:
                                                 with conn.cursor() as cur:
                                                     cur.execute(
-                                                        "UPDATE merino_suppliers SET status='Contacted' WHERE id=%s",
+                                                        "UPDATE merino_suppliers SET status='Contacted', last_contacted_at=NOW() WHERE id=%s",
                                                         (int(co["id"]),)
                                                     )
                                                 conn.commit()
@@ -2325,6 +2566,131 @@ with tab7:
             st.success("✅ Дефолтний список відновлено.")
             st.rerun()
 
+    st.divider()
+    # ── EMAIL TEMPLATES EDITOR ──────────────────────────────────────────────
+    st.markdown("##### 📝 Бібліотека шаблонів листів")
+    st.caption(
+        "Шаблони доступні у Outreach → Bulk send (dropdown). "
+        "Плейсхолдери: `{company}`, `{products}`, `{certs}`, `{contact}`. "
+        "Перший рядок з `Subject:` стає темою листа."
+    )
+    _all_tpls = get_email_templates()
+    tpl_keys = list(_all_tpls.keys())
+    tpl_e1, tpl_e2 = st.columns([2, 1])
+    with tpl_e1:
+        edit_tpl_name = st.selectbox(
+            "Виберіть шаблон для редагування",
+            tpl_keys,
+            key="edit_tpl_select"
+        )
+    with tpl_e2:
+        st.write("")
+        if st.button(f"🗑️ Видалити '{edit_tpl_name}'", key="del_tpl_btn",
+                     type="secondary", use_container_width=True,
+                     disabled=len(tpl_keys) <= 1):
+            del _all_tpls[edit_tpl_name]
+            save_email_templates(_all_tpls)
+            st.success(f"✅ Шаблон '{edit_tpl_name}' видалено.")
+            st.rerun()
+
+    edit_tpl_body = st.text_area(
+        f"Текст шаблона '{edit_tpl_name}'",
+        value=_all_tpls.get(edit_tpl_name, ""),
+        height=240,
+        key=f"edit_tpl_body_{edit_tpl_name}"
+    )
+    if st.button("💾 Зберегти шаблон", key="save_tpl_btn", type="primary"):
+        _all_tpls[edit_tpl_name] = edit_tpl_body
+        save_email_templates(_all_tpls)
+        st.success(f"✅ Шаблон '{edit_tpl_name}' збережено.")
+        st.rerun()
+
+    st.markdown("**➕ Додати новий шаблон**")
+    nt1, nt2 = st.columns([1, 3])
+    with nt1:
+        new_tpl_name = st.text_input(
+            "Назва", key="new_tpl_name",
+            placeholder="наприклад: bulk price negotiation"
+        )
+    with nt2:
+        if st.button("➕ Створити порожній", key="add_tpl_btn",
+                     disabled=not new_tpl_name.strip()):
+            if new_tpl_name.strip() in _all_tpls:
+                st.warning("Шаблон з такою назвою вже існує.")
+            else:
+                _all_tpls[new_tpl_name.strip()] = (
+                    "Subject: ... — {company}\n\n"
+                    "Hi {contact},\n\n"
+                    "[Твій текст. Плейсхолдери: {products}, {certs}]\n\n"
+                    "Best,\nm.belyakova\nmerino.tech"
+                )
+                save_email_templates(_all_tpls)
+                st.success(f"✅ Новий шаблон '{new_tpl_name.strip()}' створено. Виберіть його зверху і відредагуйте.")
+                st.rerun()
+
+    if st.button("↺ Відновити дефолтні шаблони", key="reset_tpls_btn"):
+        save_email_templates(_DEFAULT_TEMPLATES.copy())
+        st.success("✅ Дефолтні шаблони відновлено.")
+        st.rerun()
+
+    st.divider()
+    # ── BACKUP / RESTORE ────────────────────────────────────────────────────
+    st.markdown("##### 💾 Backup / Restore")
+    st.caption("Експорт всієї БД у JSON. Якщо щось зламалось — можна відновити з файлу.")
+
+    bk1, bk2 = st.columns([1, 1])
+    with bk1:
+        try:
+            with get_db() as _conn:
+                _df_full = pd.read_sql("SELECT * FROM merino_suppliers ORDER BY created_at DESC", _conn)
+            backup_json = _df_full.to_json(orient="records", date_format="iso", indent=2)
+            st.download_button(
+                f"⬇️ Backup всієї БД ({len(_df_full)} записів)",
+                data=backup_json.encode("utf-8"),
+                file_name=f"merino_suppliers_backup_{datetime.now().strftime('%Y%m%d_%H%M')}.json",
+                mime="application/json",
+                use_container_width=True,
+            )
+        except Exception as e:
+            st.error(f"Backup error: {e}")
+    with bk2:
+        restore_file = st.file_uploader("⬆️ Відновити з backup (.json)", type=["json"], key="restore_file")
+        if restore_file is not None:
+            if st.button("⚠️ Restore (додасть нові записи)", key="restore_btn_settings",
+                         type="secondary"):
+                try:
+                    rows = json.loads(restore_file.read().decode("utf-8"))
+                    if not isinstance(rows, list):
+                        st.error("Невірний формат backup-файлу.")
+                    else:
+                        # викликаємо save_to_db — він пропускає дублі
+                        added = save_to_db(
+                            [{k: r.get(k, "") for k in COLS + ["wechat"]} for r in rows],
+                            country="restore", product="restore", source="restore:backup"
+                        )
+                        log_activity("restore", restore_file.name, f"added {added}/{len(rows)}")
+                        st.session_state["db_rev"] = st.session_state.get("db_rev", 0) + 1
+                        st.success(f"✅ Відновлено: {added} нових записів (з {len(rows)} в файлі). Дублі пропущено.")
+                except Exception as e:
+                    st.error(f"Restore error: {e}")
+
+    st.divider()
+    # ── ACTIVITY LOG VIEWER ─────────────────────────────────────────────────
+    st.markdown("##### 📜 Activity log (останні 100 дій)")
+    st.caption("Хто і коли видаляв / архівував / відновлював. Допомагає коли треба зрозуміти 'куди зникло'.")
+    try:
+        with get_db() as _conn:
+            _df_log = pd.read_sql(
+                "SELECT ts, action, target, details FROM activity_log ORDER BY ts DESC LIMIT 100",
+                _conn,
+            )
+        if _df_log.empty:
+            st.info("Лог порожній.")
+        else:
+            st.dataframe(_df_log, use_container_width=True, hide_index=True, height=300)
+    except Exception:
+        st.info("Лог ще не створено (з'явиться після першої масової дії).")
+
 with tab3:
     try:
         df_ch = load_from_db()
@@ -2386,5 +2752,34 @@ with tab3:
                                    margin=dict(t=50,b=10,l=10,r=10),
                                    plot_bgcolor="white")
                 st.plotly_chart(fig4, use_container_width=True)
+
+            # ── WORLD MAP (choropleth) ────────────────────────────────────
+            st.divider()
+            st.markdown("### 🌍 Постачальники по світу")
+            # мапінг прапорця-регіону → ISO-3 код для plotly choropleth
+            REGION_TO_ISO = {
+                "🇨🇳 China":"CHN", "🇮🇳 India":"IND", "🇻🇳 Vietnam":"VNM", "🇹🇷 Turkey":"TUR",
+                "🇧🇩 Bangladesh":"BGD", "🇵🇰 Pakistan":"PAK", "🇷🇴 Romania":"ROU", "🇧🇬 Bulgaria":"BGR",
+                "🇮🇹 Italy":"ITA", "🇵🇹 Portugal":"PRT", "🇵🇱 Poland":"POL", "🇨🇿 Czech Rep":"CZE",
+                "🇷🇸 Serbia":"SRB", "🇦🇺 Australia":"AUS", "🇳🇿 New Zealand":"NZL", "🇲🇳 Mongolia":"MNG",
+                "🇲🇦 Morocco":"MAR", "🇿🇦 South Africa":"ZAF", "🇪🇹 Ethiopia":"ETH",
+                "🇵🇪 Peru":"PER", "🇦🇷 Argentina":"ARG", "🇺🇾 Uruguay":"URY",
+                "🇹🇭 Thailand":"THA", "🇮🇩 Indonesia":"IDN", "🇰🇭 Cambodia":"KHM", "🇲🇲 Myanmar":"MMR",
+                "🇱🇰 Sri Lanka":"LKA", "🇫🇯 Fiji":"FJI", "🇳🇵 Nepal":"NPL",
+                "🇱🇹 Lithuania":"LTU", "🇭🇺 Hungary":"HUN",
+            }
+            df_map = df_ch.copy()
+            df_map["iso"] = df_map["region"].map(REGION_TO_ISO)
+            df_map_grp = df_map.dropna(subset=["iso"]).groupby(["iso","region"]).size().reset_index(name="Count")
+            if not df_map_grp.empty:
+                fig_map = px.choropleth(
+                    df_map_grp, locations="iso", color="Count",
+                    hover_name="region", color_continuous_scale="Greens",
+                    projection="natural earth",
+                )
+                fig_map.update_layout(margin=dict(t=10,b=10,l=10,r=10), height=450)
+                st.plotly_chart(fig_map, use_container_width=True)
+            else:
+                st.info("Немає даних по країнах для карти.")
     except Exception as e:
         st.error(f"Chart error: {e}")
