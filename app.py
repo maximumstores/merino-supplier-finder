@@ -2499,6 +2499,22 @@ with tab6:
                         help="Можна редагувати тут — або зберегти як новий шаблон у Settings."
                     )
 
+                    # ── ATTACHMENTS (PDF / каталог / прайс) ──────────────────
+                    bulk_files = st.file_uploader(
+                        "📎 Прикріпити файли (PDF, ZIP, JPG, DOCX...) — підуть до **всіх** отримувачів",
+                        type=None,  # будь-який тип
+                        accept_multiple_files=True,
+                        key="bulk_attachments",
+                        help="Наприклад: твій каталог-PDF, прайс-лист, технічна специфікація. "
+                             "Великі файли (>20MB) можуть не пройти через SMTP."
+                    )
+                    if bulk_files:
+                        total_size_kb = sum(f.size for f in bulk_files) / 1024
+                        st.caption(
+                            f"📎 {len(bulk_files)} файл(ів), загальний розмір: **{total_size_kb:.0f} KB**"
+                            + (" ⚠️ Великий розмір — може довго слатися." if total_size_kb > 5000 else "")
+                        )
+
                     bg1, bg2 = st.columns([1, 4])
                     with bg1:
                         gen_preview_btn = st.button(
@@ -2545,9 +2561,26 @@ with tab6:
                         if not (smtp_from and smtp_user and smtp_pass):
                             st.error("❌ SMTP не налаштовано. Заповни Settings → SMTP або додай у Streamlit Secrets.")
                         else:
-                            import smtplib, time
+                            import smtplib, time, mimetypes
                             from email.mime.text import MIMEText
                             from email.mime.multipart import MIMEMultipart
+                            from email.mime.base import MIMEBase
+                            from email import encoders
+
+                            # один раз читаємо файли (щоб не читати на кожного отримувача)
+                            attachments_data = []
+                            if bulk_files:
+                                for f in bulk_files:
+                                    try:
+                                        content = f.read()
+                                        f.seek(0)  # для повторних читань
+                                        ctype, encoding = mimetypes.guess_type(f.name)
+                                        if ctype is None or encoding is not None:
+                                            ctype = "application/octet-stream"
+                                        maintype, subtype = ctype.split("/", 1)
+                                        attachments_data.append((f.name, content, maintype, subtype))
+                                    except Exception as fe:
+                                        st.warning(f"⚠️ Не вдалося прочитати {f.name}: {fe}")
 
                             progress = st.progress(0, text="Підключаємось до SMTP...")
                             log_box = st.empty()
@@ -2591,6 +2624,14 @@ with tab6:
                                         msg["To"] = co_email
                                         msg["Subject"] = subj
                                         msg.attach(MIMEText(body, "plain", "utf-8"))
+                                        # додаємо attachments якщо є
+                                        for fname, fcontent, maintype, subtype in attachments_data:
+                                            part = MIMEBase(maintype, subtype)
+                                            part.set_payload(fcontent)
+                                            encoders.encode_base64(part)
+                                            part.add_header("Content-Disposition", f'attachment; filename="{fname}"')
+                                            msg.attach(part)
+
                                         srv.sendmail(smtp_from, [co_email], msg.as_string())
 
                                         # update status
