@@ -1676,8 +1676,13 @@ with tab6:
             # ── BULK SEND (массова розсилка) ─────────────────────────────────
             # ─────────────────────────────────────────────────────────────────
             st.divider()
-            st.markdown("### 📨 Bulk send — масова розсилка")
-            st.caption("Виберіть кілька компаній → один шаблон → розсилка всім за раз. Всі отримають персоналізований лист (AI підставляє Company, Products, Contact).")
+            st.markdown("### 📨 Bulk send — масова розсилка (або одне письмо)")
+            st.caption(
+                "💡 Виберіть **1 або багато** компаній → один шаблон → розсилка. "
+                "Плейсхолдери `{company}`, `{products}`, `{certs}`, `{contact}` "
+                "автоматично замінюються для кожної. **Якщо обрана 1 компанія — піде одне персональне письмо** "
+                "(швидше і без витрат AI-токенів, на відміну від `🤖 Generate email` зверху)."
+            )
 
             # відфільтровуємо лише з email
             _has_email = df_out_f["email"].fillna("").str.strip().str.len() > 0
@@ -1746,8 +1751,13 @@ with tab6:
                             help="Показати як виглядатиме лист для першої компанії"
                         )
                     with bg2:
+                        _btn_label = (
+                            f"📨 Надіслати лист (1)"
+                            if len(selected_bulk) == 1
+                            else f"📨 Розіслати всім ({len(selected_bulk)})"
+                        )
                         bulk_send_btn = st.button(
-                            f"📨 Розіслати всім ({len(selected_bulk)})",
+                            _btn_label,
                             type="primary",
                             key="bulk_send_btn",
                             use_container_width=True,
@@ -1850,7 +1860,11 @@ with tab6:
                             progress.progress(1.0, text="Готово!")
                             st.session_state["db_rev"] = st.session_state.get("db_rev", 0) + 1
                             if sent:
-                                st.success(f"✅ Розіслано **{sent}/{len(selected_bulk)}** листів. Статус → Contacted.")
+                                if len(selected_bulk) == 1:
+                                    co_name = bulk_company_map[selected_bulk[0]].get("company", "")
+                                    st.success(f"✅ Лист надіслано до **{co_name}**. Статус → Contacted.")
+                                else:
+                                    st.success(f"✅ Розіслано **{sent}/{len(selected_bulk)}** листів. Статус → Contacted.")
                             if errors:
                                 with st.expander(f"❌ Помилки ({len(errors)})"):
                                     for err in errors[:30]:
