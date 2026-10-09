@@ -15,6 +15,15 @@ st.set_page_config(
     layout="wide",
 )
 
+# ── ВХІД ЧЕРЕЗ GOOGLE + ЖУРНАЛ ВХОДІВ ─────────────────────────────────────────
+# Тільки @maximumstores.online. Поки в Secrets немає секції [auth] — відкрито, як раніше.
+import usage
+EMAIL = usage.require_employee()
+try:
+    usage.log_login(st.secrets["DATABASE_URL"], EMAIL)
+except Exception:
+    pass
+
 # ── CONSTANTS ────────────────────────────────────────────────────────────────
 MODEL = "claude-sonnet-4-20250514"          # для основного поиска (run_search)
 CHEAP_MODEL = "claude-haiku-4-5-20251001"   # для extraction задач (×5 дешевше)
@@ -1364,9 +1373,9 @@ if st.session_state.log:
             st.markdown(line)
 
 # ── RESULTS — tabs: session / database / charts ───────────────────────────────
-tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
     "🔍 Session results", "🗄️ Database (all)", "📊 Charts", "🗄️ Archive",
-    "📥 Import", "✉️ Outreach", "⚙️ Settings"
+    "📥 Import", "✉️ Outreach", "⚙️ Settings", "📈 Activity"
 ])
 
 def render_table(df: pd.DataFrame, allow_edit: bool = False):
@@ -3269,3 +3278,8 @@ with tab3:
                 st.info("Немає даних по країнах для карти.")
     except Exception as e:
         st.error(f"Chart error: {e}")
+
+
+# ── ACTIVITY (Scorecard) ─────────────────────────────────────────────────────
+with tab8:
+    usage.render_activity_page(st.secrets["DATABASE_URL"])

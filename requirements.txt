@@ -1,6 +1,7 @@
-streamlit
+streamlit>=1.42
 anthropic
 pandas
 psycopg2-binary
 plotly
 openpyxl
+Authlib>=1.3.2
