@@ -38,7 +38,7 @@ def auth_configured() -> bool:
 def _gate(message: str = "") -> None:
     st.markdown(
         "<div style='max-width:420px;margin:12vh auto 0;text-align:center'>"
-        "<div style='font-size:42px'>🐑</div>"
+        "<img src='https://merino.tech/cdn/shop/files/MT_logo_1.png?v=1685099753&width=260' style='max-width:200px'>"
         "<h2 style='margin:8px 0 4px'>Merino Supplier Finder</h2>"
         f"<p style='color:#6e6e73;margin:0 0 18px'>{message or 'Доступ только для сотрудников @' + EMPLOYEE_DOMAIN}</p>"
         "</div>", unsafe_allow_html=True)
